@@ -54,6 +54,7 @@ from pydantic import BaseModel, ConfigDict, Field
 VISION_BASE_URL = os.getenv("VISION_BASE_URL", "").rstrip("/")
 VISION_API_KEY = os.getenv("VISION_API_KEY", "").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "").strip()
+VISION_API_STYLE = os.getenv("VISION_API_STYLE", "chat").strip().lower()
 
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "120") or "120")
 
@@ -81,6 +82,21 @@ mcp = FastMCP("multimodal_mcp")
 # --------------------------------------------------------------------------- #
 # Helpers.                                                                    #
 # --------------------------------------------------------------------------- #
+def _extract_responses_text(data: dict[str, Any]) -> str:
+    """Extract assistant text from an OpenAI Responses API response.
+
+    Shape: data["output"][*]["content"][*] where type == "output_text".
+    """
+    texts: list[str] = []
+    for item in data.get("output", []):
+        for part in item.get("content", []):
+            if part.get("type") == "output_text" and part.get("text"):
+                texts.append(part["text"])
+    if not texts:
+        raise KeyError("no output_text in response")
+    return "\n".join(texts)
+
+
 async def _chat_completion(
     base_url: str,
     api_key: str,
@@ -99,53 +115,58 @@ async def _chat_completion(
     if not model:
         raise RuntimeError("Missing VISION_MODEL")
 
-    url = f"{base_url}/chat/completions"
+    if VISION_API_STYLE == "responses":
+        url = f"{base_url}/responses"
+        payload: dict[str, Any] = {"model": model, "input": messages}
+    else:
+        url = f"{base_url}/chat/completions"
+        payload = {"model": model, "messages": messages}
+    payload.update(gen_kwargs)
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload: dict[str, Any] = {"model": model, "messages": messages}
-    payload.update(gen_kwargs)
 
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         resp = await client.post(url, json=payload, headers=headers)
         if resp.status_code >= 400:
-            # Surface the upstream body so misconfig (auth, model name, quota)
-            # is immediately visible to the caller.
             raise RuntimeError(
-                f"HTTP {resp.status_code} from {base_url} for model '{model}': "
+                f"HTTP {resp.status_code} from {url} for model '{model}': "
                 f"{resp.text[:500]}"
             )
         data = resp.json()
 
     try:
+        if VISION_API_STYLE == "responses":
+            return _extract_responses_text(data)
         return data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         raise RuntimeError(
-            f"Unexpected response shape from {base_url}: "
+            f"Unexpected response shape from {url}: "
             f"{json.dumps(data, ensure_ascii=False)[:500]}"
         )
 
 
 def _build_image_content(image: str, text: str, detail: str = "high") -> list[dict[str, Any]]:
-    """Build the OpenAI multimodal user-content list.
+    """Build the multimodal user-content list for one image + text.
 
-    `image` accepts:
-      - http(s) URL
-      - data URI like 'data:image/png;base64,...'
-      - raw base64 string (will be wrapped as PNG)
+    Chat Completions uses `image_url` / `text`; Responses API uses
+    `input_image` / `input_text`. The image source can be an http(s) URL,
+    a data URI, or raw base64 (wrapped as PNG).
     """
     if image.startswith(("http://", "https://", "data:")):
         img_url = image
     else:
-        # Assume raw base64. PNG is a safe default for screenshots.
         img_url = f"data:image/png;base64,{image.strip()}"
 
+    if VISION_API_STYLE == "responses":
+        return [
+            {"type": "input_image", "image_url": img_url, "detail": detail},
+            {"type": "input_text", "text": text},
+        ]
     return [
-        {
-            "type": "image_url",
-            "image_url": {"url": img_url, "detail": detail},
-        },
+        {"type": "image_url", "image_url": {"url": img_url, "detail": detail}},
         {"type": "text", "text": text},
     ]
 
@@ -240,6 +261,7 @@ def _config_status() -> dict[str, object]:
         "vision_base_url_set": bool(VISION_BASE_URL),
         "vision_api_key_set": bool(VISION_API_KEY),
         "vision_model": VISION_MODEL or "(not set)",
+        "vision_api_style": VISION_API_STYLE,
     }
 
 

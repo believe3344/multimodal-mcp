@@ -44,9 +44,10 @@ URL / data URI / 文件路径 / base64 四种路径无依赖。
 
 | 变量 | 含义 |
 |---|---|
-| `VISION_BASE_URL` | 视觉模型 API 地址，到 `/v1` 为止（**不带** `/chat/completions`，代码自动拼） |
+| `VISION_BASE_URL` | 视觉模型 API 地址，到 `/v1` 为止（**不带** `/chat/completions` 或 `/responses`，代码按 style 自动拼） |
 | `VISION_API_KEY` | API key |
-| `VISION_MODEL` | 模型名（`qwen3.7-plus` / `gpt-4o` / `llava:13b`） |
+| `VISION_MODEL` | 模型名（`qwen3.7-plus` / `gpt-4o` / `llava:13b` / `gpt-5.4` 等） |
+| `VISION_API_STYLE` | API 风格：`chat`（默认，`/chat/completions`）或 `responses`（GPT-5 等新模型，`/responses`） |
 
 主推理模型不在这里配——它是你客户端会话里选的那个。
 
@@ -183,8 +184,9 @@ npx @modelcontextprotocol/inspector .venv/bin/python server.py
 | 现象 | 排查 |
 |---|---|
 | `Missing API key` | 凭据字段里三个 `VISION_*` 没填齐（opencode 是 `environment` 不是 `env`） |
+| GPT-5 系列超时 / 404 | 设 `VISION_API_STYLE=responses`（走 `/responses`，默认是 `/chat/completions`） |
 | `HTTP 401` | Key 错或没开通该模型 |
-| `HTTP 404` | BaseURL 不是 `/v1` 结尾 |
+| `HTTP 404` | BaseURL 不是 `/v1` 结尾，或 style 选错 |
 | 描述模糊 | `detail` 设 `high`，或自定义 `instruction` |
 | agent 不自动调 | 检查客户端是否加载 MCP、规则文件是否被读取 |
 
