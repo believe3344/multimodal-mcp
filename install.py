@@ -195,7 +195,7 @@ def write_rules_file(path: Path) -> str:
 def build_opencode_entry(command: str, args: list[str], env: Optional[dict[str, str]] = None) -> dict:
     entry: dict[str, object] = {"type": "local", "command": [command, *args]}
     if env:
-        entry["env"] = env
+        entry["environment"] = env
     return entry
 
 
