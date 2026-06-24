@@ -41,19 +41,15 @@ import shutil
 import subprocess
 import tempfile
 from enum import Enum
-from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
-
 # --------------------------------------------------------------------------- #
 # Configuration. Vision model only - the main reasoning model is the one the  #
-# user picked in their MCP client, not configured here.                      #
+# user picked in their MCP client, not configured here.                        #
 # --------------------------------------------------------------------------- #
 VISION_BASE_URL = os.getenv("VISION_BASE_URL", "").rstrip("/")
 VISION_API_KEY = os.getenv("VISION_API_KEY", "").strip()
