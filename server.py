@@ -582,6 +582,19 @@ def _extract_pdf_for_runner(raw: bytes, pages: Optional[str], mode: str):
     return extract_pdf_pages(raw, pages, PdfMode(mode))
 
 
+MAX_BATCH_IMAGES = 8
+
+
+async def _prepare_image(source: Optional[str]) -> tuple[Optional[tuple[bytes, str]], Optional[str]]:
+    raw, err = await _resolve_image_source(source)
+    if raw is None:
+        return None, err or "no image source"
+    normalized, mime, nerr = _normalize_image(raw)
+    if normalized is None or mime is None:
+        return None, nerr or "image decode failed"
+    return (normalized, mime), None
+
+
 RUNNER = RecognitionRunner(
     prepare_image=_prepare_image,
     describe_images=_describe_for_runner,
@@ -599,19 +612,6 @@ JOBS = JobManager(
 )
 
 
-MAX_BATCH_IMAGES = 8
-
-
-async def _prepare_image(source: Optional[str]) -> tuple[Optional[tuple[bytes, str]], Optional[str]]:
-    raw, err = await _resolve_image_source(source)
-    if raw is None:
-        return None, err or "no image source"
-    normalized, mime, nerr = _normalize_image(raw)
-    if normalized is None or mime is None:
-        return None, nerr or "image decode failed"
-    return (normalized, mime), None
-
-
 # --------------------------------------------------------------------------- #
 # Input model.                                                                #
 # --------------------------------------------------------------------------- #
@@ -624,6 +624,35 @@ class StateTarget(str, Enum):
     CACHE = "cache"
     IMAGES = "images"
     ALL = "all"
+
+
+class RecognitionKind(str, Enum):
+    IMAGE = "image"
+    IMAGES = "images"
+    PDF = "pdf"
+    IMAGE_ID = "image_id"
+
+
+def _validate_recognition_request(request: RecognitionRequest) -> None:
+    count = len(request.sources)
+    if request.kind in {"image", "pdf", "image_id"} and count != 1:
+        raise ValueError(f"{request.kind} requires exactly one source")
+    if request.kind == "images" and not 1 <= count <= MAX_BATCH_IMAGES:
+        raise ValueError("images requires 1 to 8 sources")
+    if request.kind == "images" and sum(not source.strip() for source in request.sources) > 1:
+        raise ValueError("only one clipboard image is allowed")
+    if request.kind == "image_id" and not request.instruction.strip():
+        raise ValueError("image_id recognition requires a question")
+
+
+def _submit_request(request: RecognitionRequest):
+    _validate_recognition_request(request)
+    key = request.dedupe_key(VISION_MODEL, VISION_API_STYLE)
+
+    async def execute(job):
+        return await RUNNER.run(job, request)
+
+    return JOBS.submit(kind=request.kind, dedupe_key=key, runner=execute)
 
 
 # --------------------------------------------------------------------------- #
@@ -891,6 +920,73 @@ async def describe_pdf(
         return "\n\n".join(sections)
     except Exception as exc:
         return _fmt_error("describe_pdf", exc)
+
+
+@mcp.tool(name="start_recognition", annotations={"title": "Start Recognition", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True})
+async def start_recognition(
+    kind: RecognitionKind,
+    sources: list[str],
+    instruction: Optional[str] = None,
+    detail: DetailLevel = DetailLevel.HIGH,
+    pages: Optional[str] = None,
+    pdf_mode: PdfMode = PdfMode.AUTO,
+) -> str:
+    instruction_text = (instruction or "").strip()
+    if kind != RecognitionKind.IMAGE_ID and not instruction_text:
+        instruction_text = DEFAULT_VISION_PROMPT
+    request = RecognitionRequest(
+        kind=kind.value,
+        sources=sources,
+        instruction=instruction_text,
+        detail=detail.value,
+        pages=pages,
+        pdf_mode=pdf_mode.value,
+    )
+    try:
+        job = _submit_request(request)
+        return json.dumps(JOBS.snapshot(job.job_id), ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return _fmt_error("start_recognition", exc)
+
+
+@mcp.tool(name="get_recognition", annotations={"title": "Get Recognition", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def get_recognition(
+    job_id: str,
+    wait_seconds: float = 0,
+    include_partial: bool = True,
+) -> str:
+    if not 0 <= wait_seconds <= POLL_WAIT_MAX_SECONDS:
+        return _fmt_error(
+            "get_recognition",
+            ValueError(f"wait_seconds must be between 0 and {POLL_WAIT_MAX_SECONDS:g}"),
+        )
+    try:
+        if wait_seconds:
+            await JOBS.wait(job_id, wait_seconds)
+        return json.dumps(
+            JOBS.snapshot(job_id, include_partial=include_partial),
+            ensure_ascii=False,
+            indent=2,
+        )
+    except KeyError:
+        return _fmt_error(
+            "get_recognition",
+            RuntimeError("job_id expired or does not exist"),
+        )
+
+
+@mcp.tool(name="cancel_recognition", annotations={"title": "Cancel Recognition", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False})
+async def cancel_recognition(job_id: str) -> str:
+    try:
+        job = JOBS.cancel(job_id)
+        if job.task is not None and not job.task.done():
+            await asyncio.sleep(0)
+        return json.dumps(JOBS.snapshot(job_id), ensure_ascii=False, indent=2)
+    except KeyError:
+        return _fmt_error(
+            "cancel_recognition",
+            RuntimeError("job_id expired or does not exist"),
+        )
 
 
 @mcp.tool(
