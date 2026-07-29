@@ -52,6 +52,8 @@ from mcp.server.fastmcp import FastMCP
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
+from state import MultimodalState, make_cache_key
+
 # --------------------------------------------------------------------------- #
 # Configuration. Vision model only - the main reasoning model is the one the  #
 # user picked in their MCP client, not configured here.                        #
@@ -80,6 +82,8 @@ if not logger.handlers:
     logger.addHandler(_handler)
     logger.setLevel(logging.INFO)
     logger.propagate = False
+
+STATE = MultimodalState()
 
 
 # --------------------------------------------------------------------------- #
@@ -445,6 +449,55 @@ def _fmt_error(stage: str, exc: Exception) -> str:
     return f"[{stage} failed] {type(exc).__name__}: {exc}"
 
 
+def _append_meta(text: str, *, image_ids: list[str], cache_hit: bool) -> str:
+    payload: dict[str, object] = {"cache_hit": cache_hit}
+    if len(image_ids) == 1:
+        payload["image_id"] = image_ids[0]
+    else:
+        payload["image_ids"] = image_ids
+    return f"{text}\n\n<!-- multimodal-meta {json.dumps(payload, separators=(',', ':'))} -->"
+
+
+async def _describe_prepared_images(
+    images: list[tuple[bytes, str]],
+    prompt: str,
+    detail: DetailLevel,
+) -> str:
+    detail_value = detail.value if isinstance(detail, DetailLevel) else "high"
+    image_bytes = [data for data, _mime in images]
+    image_ids = [STATE.put_image(data, mime) for data, mime in images]
+    cache_key = make_cache_key(
+        image_bytes,
+        VISION_MODEL,
+        VISION_API_STYLE,
+        detail_value,
+        prompt,
+    )
+    cached = STATE.get_cached(cache_key)
+    if cached is not None:
+        logger.info("description cache hit: %s", cache_key[:8])
+        return _append_meta(cached, image_ids=image_ids, cache_hit=True)
+
+    content: list[dict[str, Any]] = []
+    for data, mime in images:
+        image_b64 = base64.b64encode(data).decode()
+        image_parts = _build_image_content(image_b64, mime, "", detail_value)
+        content.extend(image_parts[:1])
+    if VISION_API_STYLE == "responses":
+        content.append({"type": "input_text", "text": prompt})
+    else:
+        content.append({"type": "text", "text": prompt})
+
+    description = await _chat_completion(
+        VISION_BASE_URL,
+        VISION_API_KEY,
+        VISION_MODEL,
+        [{"role": "user", "content": content}],
+    )
+    STATE.put_cached(cache_key, description)
+    return _append_meta(description, image_ids=image_ids, cache_hit=False)
+
+
 # --------------------------------------------------------------------------- #
 # Input model.                                                                #
 # --------------------------------------------------------------------------- #
@@ -564,32 +617,32 @@ async def describe_image(
         - "识别 /tmp/chart.png 里的表格"               -> image="/tmp/chart.png"
         - "把这张流程图(base64)转成 Mermaid"            -> instruction="...", image=<b64>
     '''
+    instruction = instruction if isinstance(instruction, (str, type(None))) else instruction.default
+    detail = detail if isinstance(detail, DetailLevel) else detail.default
+
     raw, err = await _resolve_image_source(image)
     if raw is None:
         return _fmt_error("describe_image", RuntimeError(err or "no image source"))
 
     normalized, mime, nerr = _normalize_image(raw)
-    if normalized is None:
+    if normalized is None or mime is None:
         return _fmt_error("describe_image", RuntimeError(nerr or "image decode failed"))
 
-    image_b64 = base64.b64encode(normalized).decode()
     prompt = instruction or DEFAULT_VISION_PROMPT
-    content = _build_image_content(image_b64, mime or "image/png", prompt, detail.value)
-    messages = [{"role": "user", "content": content}]
     t0 = time.monotonic()
     try:
-        description = await _chat_completion(
-            VISION_BASE_URL, VISION_API_KEY, VISION_MODEL, messages
+        description = await _describe_prepared_images(
+            [(normalized, mime)], prompt, detail
         )
-    except Exception as exc:  # noqa: BLE001 - we surface any upstream failure
+    except Exception as exc:  # noqa: BLE001
         logger.error(
-            "upstream call failed after %.1fs (payload %.2fMB, model %s): %s",
-            time.monotonic() - t0, len(image_b64) / 1e6, VISION_MODEL or "(unset)", exc,
+            "upstream call failed after %.1fs (model %s): %s",
+            time.monotonic() - t0, VISION_MODEL or "(unset)", exc,
         )
         return _fmt_error("describe_image", exc)
     logger.info(
-        "upstream call ok: %.1fs, payload %.2fMB, reply %d chars",
-        time.monotonic() - t0, len(image_b64) / 1e6, len(description),
+        "describe_image ok: %.1fs, reply %d chars",
+        time.monotonic() - t0, len(description),
     )
     return description
 
