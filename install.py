@@ -53,6 +53,14 @@ RULES_BLOCK = f"""{RULES_MARKER_START}
 3. 当消息里出现 `[Image 1]`、`[Image N]`、`[图片]`、`[Image attachment]` 等占位符（说明用户粘贴了图片附件，但客户端或网关把真实图片替换成占位符），立即调用 `describe_image`，`image` 留空——工具从系统剪贴板读取用户刚截图/粘贴的图片。即使用户没打字、只发了图片，也要这么做。拿到描述后主动告诉用户你看到了什么，并询问需要做什么。
 
 4. 工具返回的是图片文字描述，不是最终答案。拿到描述后由主模型自己推理并回答用户。
+
+5. 用户一次提供多张图片、要求比较图片或连续阅读多张截图时，调用 `describe_images`；保持用户提供的图片顺序。
+
+6. 用户提供 PDF 时调用 `describe_pdf`。数字 PDF 直接提取文字，扫描页自动视觉识别；需要指定页码时传 `pages="1-3,5"`。
+
+7. `describe_image`、`describe_images` 和扫描 PDF 会返回 `image_id`。用户对刚才的图片继续追问时，优先调用 `ask_image(image_id, question)`，不要要求用户重新上传。
+
+8. `image_id` 只在当前 MCP 进程内短期有效；过期后重新调用原识别工具。不要把 `image_id` 当永久文件标识。
 {RULES_MARKER_END}
 """
 

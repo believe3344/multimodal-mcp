@@ -35,6 +35,23 @@ client reads its rules.
    After the tool returns, YOU (the main model) reason over the description
    and answer the user yourself.
 
+5. When the user provides multiple images at once, wants to compare images,
+   or needs to read multiple screenshots in succession, call `describe_images`
+   and keep the user's image order.
+
+6. When the user provides a PDF, call `describe_pdf`. Digital PDF pages are
+   extracted as text directly; scanned pages are visually recognized. Use
+   `pages="1-3,5"` to specify page ranges.
+
+7. `describe_image`, `describe_images`, and scanned PDF pages return an
+   `image_id`. When the user asks a follow-up question about a recently
+   described image, prefer `ask_image(image_id, question)` — do not ask
+   the user to upload the image again.
+
+8. `image_id` is only valid within the current MCP process (30 minute TTL).
+   If expired, re-call the original description tool. Never treat `image_id`
+   as a permanent file identifier.
+
 ## Where each client reads its rules
 
 Copy the rules above into the file matching your client:
