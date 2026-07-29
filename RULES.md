@@ -53,8 +53,9 @@ client reads its rules.
     as a permanent file identifier.
 
 9. If a describe tool returns `status: processing` and a `job_id`, do not
-   call the describe tool again. Call `get_recognition(job_id, wait_seconds=15)`
-   until the status is completed, partial, failed, or cancelled.
+   call the describe tool again. Call `get_recognition(job_id, wait_seconds=50)`
+   exactly once. If it is still processing, tell the user the task is still
+   running; do not make further status calls in the current turn.
 
 10. When a PDF task returns partial results, answer from completed pages and
     clearly report failed page numbers. Retry only failed pages when the user

@@ -12,12 +12,13 @@ async def test_describe_image_caches_and_returns_image_id(monkeypatch, png_bytes
     async def fake_resolve(_source):
         return png_bytes, None
 
-    async def fake_chat(_base_url, _api_key, _model, messages, **_kwargs):
+    async def fake_vision(_provider, _base_url, _api_key, _model, messages, **_kwargs):
         calls.append(messages)
         return "visible text"
 
     monkeypatch.setattr(server, "_resolve_image_source", fake_resolve)
-    monkeypatch.setattr(server, "_chat_completion", fake_chat)
+    monkeypatch.setattr(server, "_vision_completion", fake_vision)
+    monkeypatch.setattr(server, "PROVIDER", "openai")
     monkeypatch.setattr(server, "STATE", MultimodalState())
     monkeypatch.setattr(
         server,
@@ -47,13 +48,14 @@ async def test_describe_images_sends_images_in_order(monkeypatch, png_bytes: byt
     def fake_normalize(data):
         return data, "image/png", None
 
-    async def fake_chat(_base_url, _api_key, _model, messages, **_kwargs):
+    async def fake_vision(_provider, _base_url, _api_key, _model, messages, **_kwargs):
         captured.extend(messages[0]["content"])
         return "comparison"
 
     monkeypatch.setattr(server, "_resolve_image_source", fake_resolve)
     monkeypatch.setattr(server, "_normalize_image", fake_normalize)
-    monkeypatch.setattr(server, "_chat_completion", fake_chat)
+    monkeypatch.setattr(server, "_vision_completion", fake_vision)
+    monkeypatch.setattr(server, "PROVIDER", "openai")
     monkeypatch.setattr(server, "STATE", MultimodalState())
     monkeypatch.setattr(
         server,
@@ -70,9 +72,95 @@ async def test_describe_images_sends_images_in_order(monkeypatch, png_bytes: byt
 
 
 @pytest.mark.asyncio
+async def test_describe_image_uses_anthropic_request_shape(monkeypatch, png_bytes: bytes) -> None:
+    captured = {}
+
+    async def fake_resolve(_source):
+        return png_bytes, None
+
+    async def fake_post(url, payload, headers):
+        captured["url"] = url
+        captured["payload"] = payload
+        captured["headers"] = headers
+
+        class FakeResponse:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return {
+                    "content": [
+                        {"type": "text", "text": "line 1"},
+                        {"type": "tool_use", "id": "ignore"},
+                        {"type": "text", "text": "line 2"},
+                    ]
+                }
+
+        return FakeResponse()
+
+    monkeypatch.setattr(server, "_resolve_image_source", fake_resolve)
+    monkeypatch.setattr(server, "_post_json_with_retry", fake_post)
+    monkeypatch.setattr(server, "PROVIDER", "anthropic")
+    monkeypatch.setattr(server, "BASE_URL", "https://vision.example.com")
+    monkeypatch.setattr(server, "API_KEY", "secret")
+    monkeypatch.setattr(server, "MODEL_NAME", "claude-3-7-sonnet")
+    monkeypatch.setattr(server, "STATE", MultimodalState())
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
+
+    result = await server.describe_image(image="ignored")
+
+    assert result.startswith("line 1\nline 2")
+    assert captured["url"] == "https://vision.example.com/v1/messages"
+    assert captured["headers"] == {
+        "x-api-key": "secret",
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+    }
+    content = captured["payload"]["messages"][0]["content"]
+    assert content[0]["type"] == "image"
+    assert content[0]["source"]["type"] == "base64"
+    assert content[0]["source"]["media_type"] == "image/png"
+    assert content[0]["source"]["data"]
+    assert content[1]["type"] == "text"
+
+
+@pytest.mark.asyncio
 async def test_describe_images_rejects_invalid_counts() -> None:
     assert "requires 1 to 8" in await server.describe_images(images=[])
     assert "requires 1 to 8" in await server.describe_images(images=["x"] * 9)
+
+
+@pytest.mark.asyncio
+async def test_describe_image_rejects_invalid_provider_before_resolve(monkeypatch) -> None:
+    async def fail_resolve(_source):
+        raise AssertionError("image source resolve must not run")
+
+    monkeypatch.setattr(server, "PROVIDER", "responses")
+    monkeypatch.setattr(server, "_resolve_image_source", fail_resolve)
+
+    result = await server.describe_image(image="ignored")
+
+    assert "Unsupported PROVIDER 'responses'" in result
+
+
+@pytest.mark.asyncio
+async def test_start_recognition_rejects_invalid_provider_before_submit(monkeypatch) -> None:
+    def fail_submit(**_kwargs):
+        raise AssertionError("job submit must not run")
+
+    monkeypatch.setattr(server, "PROVIDER", "responses")
+    monkeypatch.setattr(server.JOBS, "submit", fail_submit)
+
+    result = await server.start_recognition(
+        kind=server.RecognitionKind.IMAGE,
+        sources=["ignored"],
+    )
+
+    assert "Unsupported PROVIDER 'responses'" in result
 
 
 @pytest.mark.asyncio

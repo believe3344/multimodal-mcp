@@ -52,6 +52,13 @@ from mcp.server.fastmcp import FastMCP
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
+from providers import (
+    build_content,
+    build_request,
+    extract_response_text,
+    normalize_provider,
+    validate_provider,
+)
 from state import MultimodalState, make_cache_key
 
 from pdf_support import MAX_PDF_PAGES, PdfMode, extract_pdf_pages
@@ -63,10 +70,10 @@ from recognition import RecognitionRequest, RecognitionRunner
 # Configuration. Vision model only - the main reasoning model is the one the  #
 # user picked in their MCP client, not configured here.                        #
 # --------------------------------------------------------------------------- #
-VISION_BASE_URL = os.getenv("VISION_BASE_URL", "").rstrip("/")
-VISION_API_KEY = os.getenv("VISION_API_KEY", "").strip()
-VISION_MODEL = os.getenv("VISION_MODEL", "").strip()
-VISION_API_STYLE = os.getenv("VISION_API_STYLE", "chat").strip().lower()
+BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
+API_KEY = os.getenv("API_KEY", "").strip()
+MODEL_NAME = os.getenv("MODEL_NAME", "").strip()
+PROVIDER = normalize_provider(os.getenv("PROVIDER"))
 
 def _positive_float_env(name: str, default: float) -> float:
     try:
@@ -94,8 +101,8 @@ def _positive_int_env(name: str, default: int) -> int:
         return default
 
 
-SYNC_WAIT_SECONDS = _positive_float_env("SYNC_WAIT_SECONDS", 20.0)
-POLL_WAIT_MAX_SECONDS = _positive_float_env("POLL_WAIT_MAX_SECONDS", 30.0)
+SYNC_WAIT_SECONDS = _positive_float_env("SYNC_WAIT_SECONDS", 10.0)
+POLL_WAIT_MAX_SECONDS = _positive_float_env("POLL_WAIT_MAX_SECONDS", 50.0)
 UPSTREAM_CONNECT_TIMEOUT = _positive_float_env("UPSTREAM_CONNECT_TIMEOUT", 10.0)
 UPSTREAM_READ_TIMEOUT = _positive_float_env("UPSTREAM_READ_TIMEOUT", 90.0)
 UPSTREAM_MAX_RETRIES = _positive_int_env("UPSTREAM_MAX_RETRIES", 2)
@@ -149,21 +156,6 @@ mcp = FastMCP("multimodal_mcp")
 # --------------------------------------------------------------------------- #
 # Helpers.                                                                    #
 # --------------------------------------------------------------------------- #
-def _extract_responses_text(data: dict[str, Any]) -> str:
-    """Extract assistant text from an OpenAI Responses API response.
-
-    Shape: data["output"][*]["content"][*] where type == "output_text".
-    """
-    texts: list[str] = []
-    for item in data.get("output", []):
-        for part in item.get("content", []):
-            if part.get("type") == "output_text" and part.get("text"):
-                texts.append(part["text"])
-    if not texts:
-        raise KeyError("no output_text in response")
-    return "\n".join(texts)
-
-
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 UPSTREAM_SEMAPHORE = asyncio.Semaphore(UPSTREAM_MAX_CONCURRENCY)
 UPSTREAM_TIMEOUT = httpx.Timeout(
@@ -209,36 +201,23 @@ async def _post_json_with_retry(
     raise RuntimeError("unreachable retry state")
 
 
-async def _chat_completion(
+async def _vision_completion(
+    provider: str,
     base_url: str,
     api_key: str,
     model: str,
     messages: list[dict[str, Any]],
     **gen_kwargs: Any,
 ) -> str:
-    """Call an OpenAI-compatible /v1/chat/completions endpoint.
-
-    Returns the assistant message text from the first choice.
-    """
-    if not api_key:
-        raise RuntimeError(f"Missing API key for model '{model}'")
-    if not base_url:
-        raise RuntimeError(f"Missing base URL for model '{model}'")
-    if not model:
-        raise RuntimeError("Missing VISION_MODEL")
-
-    if VISION_API_STYLE == "responses":
-        url = f"{base_url}/responses"
-        payload: dict[str, Any] = {"model": model, "input": messages}
-    else:
-        url = f"{base_url}/chat/completions"
-        payload = {"model": model, "messages": messages}
-    payload.update(gen_kwargs)
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    validate_provider(provider)
+    url, payload, headers = build_request(
+        provider,
+        base_url,
+        api_key,
+        model,
+        messages,
+        **gen_kwargs,
+    )
 
     resp = await _post_json_with_retry(url, payload, headers)
     if resp.status_code >= 400:
@@ -249,35 +228,12 @@ async def _chat_completion(
     data = resp.json()
 
     try:
-        if VISION_API_STYLE == "responses":
-            return _extract_responses_text(data)
-        return data["choices"][0]["message"]["content"]
+        return extract_response_text(provider, data)
     except (KeyError, IndexError, TypeError):
         raise RuntimeError(
             f"Unexpected response shape from {url}: "
             f"{json.dumps(data, ensure_ascii=False)[:500]}"
         )
-
-
-def _build_image_content(
-    image_b64: str, mime: str, text: str, detail: str = "high"
-) -> list[dict[str, Any]]:
-    """Build the multimodal user-content list for one image + text.
-
-    Chat Completions uses `image_url` / `text`; Responses API uses
-    `input_image` / `input_text`. `mime` is the sniffed real type.
-    """
-    img_url = f"data:{mime};base64,{image_b64}"
-
-    if VISION_API_STYLE == "responses":
-        return [
-            {"type": "input_image", "image_url": img_url, "detail": detail},
-            {"type": "input_text", "text": text},
-        ]
-    return [
-        {"type": "image_url", "image_url": {"url": img_url, "detail": detail}},
-        {"type": "text", "text": text},
-    ]
 
 
 def read_clipboard_image() -> tuple[Optional[bytes], Optional[str]]:
@@ -371,11 +327,21 @@ def read_clipboard_image() -> tuple[Optional[bytes], Optional[str]]:
 
 def _config_status() -> dict[str, object]:
     """Health snapshot. Never prints the key value, only presence."""
+    provider_valid = True
+    provider_error: Optional[str] = None
+    try:
+        validate_provider(PROVIDER)
+    except ValueError as exc:
+        provider_valid = False
+        provider_error = str(exc)
+
     return {
-        "vision_base_url_set": bool(VISION_BASE_URL),
-        "vision_api_key_set": bool(VISION_API_KEY),
-        "vision_model": VISION_MODEL or "(not set)",
-        "vision_api_style": VISION_API_STYLE,
+        "base_url_set": bool(BASE_URL),
+        "api_key_set": bool(API_KEY),
+        "model_name": MODEL_NAME or "(not set)",
+        "provider": PROVIDER,
+        "provider_valid": provider_valid,
+        "provider_error": provider_error,
     }
 
 
@@ -539,8 +505,8 @@ async def _describe_prepared_images(
     image_ids = [STATE.put_image(data, mime) for data, mime in images]
     cache_key = make_cache_key(
         image_bytes,
-        VISION_MODEL,
-        VISION_API_STYLE,
+        MODEL_NAME,
+        PROVIDER,
         detail_value,
         prompt,
     )
@@ -552,17 +518,14 @@ async def _describe_prepared_images(
     content: list[dict[str, Any]] = []
     for data, mime in images:
         image_b64 = base64.b64encode(data).decode()
-        image_parts = _build_image_content(image_b64, mime, "", detail_value)
-        content.extend(image_parts[:1])
-    if VISION_API_STYLE == "responses":
-        content.append({"type": "input_text", "text": prompt})
-    else:
-        content.append({"type": "text", "text": prompt})
+        content.extend(build_content(PROVIDER, image_b64, mime, detail=detail_value))
+    content.append({"type": "text", "text": prompt})
 
-    description = await _chat_completion(
-        VISION_BASE_URL,
-        VISION_API_KEY,
-        VISION_MODEL,
+    description = await _vision_completion(
+        PROVIDER,
+        BASE_URL,
+        API_KEY,
+        MODEL_NAME,
         [{"role": "user", "content": content}],
     )
     STATE.put_cached(cache_key, description)
@@ -645,8 +608,9 @@ def _validate_recognition_request(request: RecognitionRequest) -> None:
 
 
 def _submit_request(request: RecognitionRequest):
+    validate_provider(PROVIDER)
     _validate_recognition_request(request)
-    key = request.dedupe_key(VISION_MODEL, VISION_API_STYLE)
+    key = request.dedupe_key(MODEL_NAME, PROVIDER)
 
     async def execute(job):
         return await RUNNER.run(job, request)
@@ -665,7 +629,7 @@ async def _wait_for_compat_result(job) -> str:
         {
             "status": snapshot["status"],
             "job_id": job.job_id,
-            "message": "识别仍在后台进行，请调用 get_recognition",
+            "message": "识别仍在后台进行；仅调用一次 get_recognition(job_id, wait_seconds=50)",
             "completed_units": snapshot["completed_units"],
             "total_units": snapshot["total_units"],
         },
@@ -982,11 +946,13 @@ async def multimodal_config_status() -> str:
     '''Report whether the required vision env vars are set (never the values).
 
     Call once after first wiring the server into a client, to confirm
-    VISION_BASE_URL, VISION_API_KEY and VISION_MODEL are all configured.
+    PROVIDER, BASE_URL, API_KEY and MODEL_NAME are configured and that
+    PROVIDER is supported.
     The API key itself is never exposed; only a boolean.
 
     Returns:
-        str: JSON with vision_base_url_set, vision_api_key_set, vision_model.
+        str: JSON with base_url_set, api_key_set, model_name, provider,
+        provider_valid and provider_error.
     '''
     return json.dumps(_config_status(), ensure_ascii=False, indent=2)
 

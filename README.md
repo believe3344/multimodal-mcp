@@ -13,7 +13,7 @@
 | `describe_pdf` | 数字 PDF 文本提取、扫描页视觉识别 |
 | `ask_image` | 使用 `image_id` 对图片继续提问 |
 | `start_recognition` | 启动图片、多图、PDF 或 image_id 后台识别 |
-| `get_recognition` | 查询任务进度，支持最多 30 秒长轮询 |
+| `get_recognition` | 查询任务进度，支持最多 50 秒长等待 |
 | `cancel_recognition` | 取消后台识别任务 |
 | `multimodal_cache_status` | 查看缓存命中、任务与内存占用 |
 | `clear_multimodal_state` | 清理描述缓存或短期图片会话 |
@@ -34,9 +34,9 @@
 
 **缓存与生命周期**：描述缓存 TTL 1 小时，图片会话 TTL 30 分钟。数据仅在进程内存中，重启即清空。PDF 每次最多处理 20 页，多图最多 8 张。
 
-**后台识别**：现有 `describe_*` 工具最多同步等待 20 秒。未完成时返回 `job_id`，任务仍在后台运行；调用 `get_recognition(job_id, wait_seconds=15)` 获取进度。任务结果保留 1 小时，进程重启后失效。最多并发两个视觉请求，瞬态错误自动重试两次。
+**后台识别**：现有 `describe_*` 工具最多同步等待 10 秒。未完成时返回 `job_id`，任务仍在后台运行；规则要求仅调用一次 `get_recognition(job_id, wait_seconds=50)`。若仍未完成，等待用户下一次追问后再查询，避免短间隔轮询放大主模型 token 消耗。任务结果保留 1 小时，进程重启后失效。最多并发两个视觉请求，瞬态错误自动重试两次。
 
-`multimodal_config_status` 自检三个 vision 变量是否配齐（不打印 key）。
+`multimodal_config_status` 自检四个配置字段是否合理（不打印 key）。
 
 "剪贴板"路径解决客户端拦截粘贴图片的问题：截图后不粘贴到聊天框，打字说"看下我的截图"，工具直接读剪贴板。跨平台跨客户端。
 
@@ -58,16 +58,19 @@ URL / data URI / 文件路径 / base64 四种路径无依赖。
 
 ### 凭据
 
-三个环境变量，写进客户端 MCP 配置的凭据字段：
+四个环境变量，写进客户端 MCP 配置的凭据字段：
 
 | 变量 | 含义 |
 |---|---|
-| `VISION_BASE_URL` | 视觉模型 API 地址，到 `/v1` 为止（**不带** `/chat/completions` 或 `/responses`，代码按 style 自动拼） |
-| `VISION_API_KEY` | API key |
-| `VISION_MODEL` | 模型名（`qwen3.7-plus` / `gpt-4o` / `llava:13b` / `gpt-5.4` 等） |
-| `VISION_API_STYLE` | API 风格：`chat`（默认，`/chat/completions`）或 `responses`（GPT-5 等新模型，`/responses`） |
+| `PROVIDER` | 视觉 API 提供方：`openai`（默认）或 `anthropic` |
+| `BASE_URL` | 视觉模型 API 根地址。`PROVIDER=openai` 时填 `/v1` 根；`PROVIDER=anthropic` 时填服务根，例如 `https://api.anthropic.com` |
+| `API_KEY` | API key |
+| `MODEL_NAME` | 模型名（`qwen3.7-plus` / `gpt-4o` / `llava:13b` / `gpt-5.4` 等） |
 
 主推理模型不在这里配——它是你客户端会话里选的那个。
+
+- `PROVIDER=openai`：服务端请求 `BASE_URL + /chat/completions`
+- `PROVIDER=anthropic`：服务端请求 `BASE_URL + /v1/messages`
 
 > 各客户端的凭据字段名不一样：opencode 叫 `environment`，Claude / Cursor / Codex 叫 `env`。`install.py` 会自动用对的字段名。
 
@@ -81,9 +84,16 @@ python install.py --yes        # 跳过确认
 
 # 带凭据,一条命令配齐
 python install.py \
+  --provider openai \
   --base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
   --api-key sk-xxxxx \
   --model qwen3.7-plus
+
+python install.py \
+  --provider anthropic \
+  --base-url https://api.anthropic.com \
+  --api-key sk-ant-xxxxx \
+  --model claude-3-7-sonnet-latest
 
 # 强制 uvx / local 模式
 python install.py --mode uvx --repo git+https://github.com/believe3344/multimodal-mcp
@@ -108,9 +118,10 @@ python install.py --mode local
       "type": "local",
       "command": ["uvx", "--from", "git+https://github.com/believe3344/multimodal-mcp", "multimodal-mcp"],
       "environment": {
-        "VISION_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "VISION_API_KEY": "sk-xxxxx",
-        "VISION_MODEL": "qwen3.7-plus"
+        "PROVIDER": "openai",
+        "BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "API_KEY": "sk-xxxxx",
+        "MODEL_NAME": "qwen3.7-plus"
       }
     }
   }
@@ -126,9 +137,10 @@ python install.py --mode local
       "command": "uvx",
       "args": ["--from", "git+https://github.com/believe3344/multimodal-mcp", "multimodal-mcp"],
       "env": {
-        "VISION_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "VISION_API_KEY": "sk-xxxxx",
-        "VISION_MODEL": "qwen3.7-plus"
+        "PROVIDER": "openai",
+        "BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "API_KEY": "sk-xxxxx",
+        "MODEL_NAME": "qwen3.7-plus"
       }
     }
   }
@@ -141,7 +153,7 @@ python install.py --mode local
 [mcp_servers.multimodal]
 command = "uvx"
 args = ["--from", "git+https://github.com/believe3344/multimodal-mcp", "multimodal-mcp"]
-env = { VISION_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1", VISION_API_KEY = "sk-xxxxx", VISION_MODEL = "qwen3.7-plus" }
+env = { PROVIDER = "openai", BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1", API_KEY = "sk-xxxxx", MODEL_NAME = "qwen3.7-plus" }
 ```
 
 **local 模式**：把上面 uvx 的 command/args 换成 venv python + `server.py` 绝对路径，凭据字段不变（opencode 仍 `environment`，其他仍 `env`）。`command` 必须是 venv 里的 python，否则缺 `mcp` / `httpx` 依赖。准备 venv：
@@ -161,10 +173,10 @@ uv pip install -r requirements.txt
 ## 测试
 
 重启客户端后：
-1. 调 `multimodal_config_status`，确认三个变量都 set
+1. 调 `multimodal_config_status`，确认 `PROVIDER` 正确且凭据都 set
 2. 调 `describe_image`，`image` 留空（读剪贴板）或传 URL
 
-或用 MCP Inspector 独立测试（不依赖客户端，需先在 shell `export VISION_*` 三个变量）：
+或用 MCP Inspector 独立测试（不依赖客户端，需先在 shell 设置 `PROVIDER` / `BASE_URL` / `API_KEY` / `MODEL_NAME`）：
 
 ```bash
 npx @modelcontextprotocol/inspector .venv/bin/python server.py
@@ -195,16 +207,17 @@ npx @modelcontextprotocol/inspector .venv/bin/python server.py
 
 ### 粘贴附件（占位符）
 
-客户端把粘贴的图片替换成 `[Image 1]` 占位符时，agent 按规则会调 `describe_image`、`image` 留空读剪贴板（图片还在剪贴板里）。
+部分客户端在把图片粘贴到对话框后，会把原始图片变成 `[Image 1]` 占位符且不保留系统剪贴板数据。对 OpenCode，可安装附件桥接插件：在 `chat.message` 钩子中把附件写进 `~/.cache/opencode/multimodal-attachments`，并向模型注入本地路径；agent 将路径传给 `describe_image`，不依赖剪贴板。
+
+插件文件位于 `~/.config/opencode/plugins/multimodal-attachment-bridge.js`，OpenCode 会自动加载。临时图片仅当前用户可读，1 小时后在下次 OpenCode 启动时清理。
 
 ## 故障排查
 
 | 现象 | 排查 |
 |---|---|
-| `Missing API key` | 凭据字段里三个 `VISION_*` 没填齐（opencode 是 `environment` 不是 `env`） |
-| GPT-5 系列超时 / 404 | 设 `VISION_API_STYLE=responses`（走 `/responses`，默认是 `/chat/completions`） |
+| `Missing API key` | 凭据字段里 `PROVIDER` / `API_KEY` / `BASE_URL` / `MODEL_NAME` 没填齐，或字段写错（opencode 是 `environment` 不是 `env`） |
 | `HTTP 401` | Key 错或没开通该模型 |
-| `HTTP 404` | BaseURL 不是 `/v1` 结尾，或 style 选错 |
+| `HTTP 404` | `PROVIDER=openai` 时 `BASE_URL` 不是 `/v1` 根，或 `PROVIDER=anthropic` 时 `BASE_URL` 误填成 `/v1/messages` 之类的完整路径 |
 | 大图超时 / 间歇失败 | 已在服务端自动压缩；仍失败就看 MCP 服务器 stderr 日志里的体积与耗时 |
 | `not a supported image` | 输入不是图片文件（只支持 PNG/JPEG/GIF/WebP/BMP） |
 | `clipboard has no image` | 截图后别再复制其他内容；macOS 用 Cmd+Ctrl+Shift+4 才直接进剪贴板 |

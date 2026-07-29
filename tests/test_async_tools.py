@@ -109,6 +109,32 @@ async def test_compat_tool_returns_job_without_cancelling_slow_task(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_get_recognition_accepts_single_long_wait(monkeypatch) -> None:
+    async def fake_run(job, request):
+        job.set_total_units(1)
+        job.complete_unit("image", "done")
+        return "done"
+
+    monkeypatch.setattr(server.RUNNER, "run", fake_run)
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
+    started = json.loads(
+        await server.start_recognition(
+            kind=server.RecognitionKind.IMAGE,
+            sources=["image"],
+        )
+    )
+
+    completed = json.loads(
+        await server.get_recognition(started["job_id"], wait_seconds=50)
+    )
+    assert completed["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_cache_status_reports_jobs_and_clear_all_cancels_them(monkeypatch) -> None:
     async def fake_run(job, request):
         await asyncio.Event().wait()

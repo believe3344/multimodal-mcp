@@ -7,5 +7,10 @@ venv/
 .DS_Store
 *.egg-info/
 dist/
+docs/
 build/
 .python-version
+.clinerules
+.windsurfrules
+CLAUDE.md
+.codegraph/

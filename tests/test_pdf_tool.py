@@ -13,7 +13,7 @@ async def test_describe_pdf_returns_digital_text_without_vision(monkeypatch, dig
     async def fail_if_called(*_args, **_kwargs):
         raise AssertionError("vision API must not be called for digital text")
 
-    monkeypatch.setattr(server, "_chat_completion", fail_if_called)
+    monkeypatch.setattr(server, "_vision_completion", fail_if_called)
     monkeypatch.setattr(server, "STATE", MultimodalState())
     monkeypatch.setattr(
         server,

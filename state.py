@@ -21,12 +21,12 @@ def make_image_id(data: bytes) -> str:
 def make_cache_key(
     images: list[bytes],
     model: str,
-    api_style: str,
+    provider: str,
     detail: str,
     instruction: str,
 ) -> str:
     digest = hashlib.sha256(b"multimodal-cache-v1\0")
-    for value in (model, api_style, detail, instruction):
+    for value in (model, provider, detail, instruction):
         digest.update(value.encode("utf-8"))
         digest.update(b"\0")
     for image in images:

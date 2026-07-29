@@ -15,7 +15,7 @@ Detects installed MCP clients and configures them automatically:
 Run:
     python install.py                          # auto mode, interactive
     python install.py --yes                    # auto mode, skip confirm
-    python install.py --base-url URL --api-key KEY --model MODEL
+    python install.py --provider openai --base-url URL --api-key KEY --model MODEL
     python install.py --mode uvx --repo git+https://github.com/USER/multimodal-mcp
     python install.py --mode local             # force venv mode
 
@@ -62,7 +62,7 @@ RULES_BLOCK = f"""{RULES_MARKER_START}
 
 8. `image_id` 只在当前 MCP 进程内短期有效；过期后重新调用原识别工具。不要把 `image_id` 当永久文件标识。
 
-9. 如果 describe 工具返回 `status: processing` 和 `job_id`，不要再次调用 describe 工具。使用 `get_recognition(job_id, wait_seconds=15)` 轮询直到状态为 completed、partial、failed 或 cancelled。
+9. 如果 describe 工具返回 `status: processing` 和 `job_id`，不要再次调用 describe 工具。只调用一次 `get_recognition(job_id, wait_seconds=50)`；如果仍未完成，告知用户任务仍在处理中，不要在当前回合继续查询。
 
 10. 当 PDF 任务返回 partial 结果时，用已完成页面回答用户问题，并清晰报告失败页码。只在用户要求时重试失败页。
 {RULES_MARKER_END}
@@ -435,6 +435,12 @@ def main() -> int:
         "Auto-detected from git remote if omitted.",
     )
     parser.add_argument(
+        "--provider",
+        choices=["openai", "anthropic"],
+        default="openai",
+        help="vision API provider; openai uses /chat/completions, anthropic uses /v1/messages",
+    )
+    parser.add_argument(
         "--base-url",
         help="Vision API base URL. Written into client config env.",
     )
@@ -469,9 +475,10 @@ def main() -> int:
     env: Optional[dict[str, str]] = None
     if all(provided):
         env = {
-            "VISION_BASE_URL": args.base_url,
-            "VISION_API_KEY": args.api_key,
-            "VISION_MODEL": args.model,
+            "PROVIDER": args.provider,
+            "BASE_URL": args.base_url,
+            "API_KEY": args.api_key,
+            "MODEL_NAME": args.model,
         }
 
     command, cmd_args, mode_used = resolve_server_entry(args.mode, system, args.repo, args.yes)
@@ -499,7 +506,7 @@ def main() -> int:
     if env:
         print("  Credentials written to client configs.")
     else:
-        print("  Add VISION_BASE_URL / VISION_API_KEY / VISION_MODEL to the env field of each client config.")
+        print("  Add PROVIDER / BASE_URL / API_KEY / MODEL_NAME to the env field of each client config.")
     print("  Restart the clients, then say \"看下我的截图\" to test.")
     print("=" * 60)
     return 0

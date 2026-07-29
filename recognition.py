@@ -18,7 +18,7 @@ class RecognitionRequest:
     pages: Optional[str] = None
     pdf_mode: str = "auto"
 
-    def dedupe_key(self, model: str, api_style: str) -> str:
+    def dedupe_key(self, model: str, provider: str) -> str:
         payload = json.dumps(
             {
                 "v": 1,
@@ -29,7 +29,7 @@ class RecognitionRequest:
                 "pages": self.pages,
                 "pdf_mode": self.pdf_mode,
                 "model": model,
-                "api_style": api_style,
+                "provider": provider,
             },
             ensure_ascii=False,
             sort_keys=True,

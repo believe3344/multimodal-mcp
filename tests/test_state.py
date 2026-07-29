@@ -2,11 +2,12 @@ from state import MultimodalState, make_cache_key, make_image_id
 
 
 def test_cache_key_changes_with_request_parameters(png_bytes: bytes) -> None:
-    first = make_cache_key([png_bytes], "model-a", "chat", "high", "read")
-    assert first == make_cache_key([png_bytes], "model-a", "chat", "high", "read")
-    assert first != make_cache_key([png_bytes], "model-b", "chat", "high", "read")
-    assert first != make_cache_key([png_bytes], "model-a", "chat", "low", "read")
-    assert first != make_cache_key([png_bytes], "model-a", "chat", "high", "compare")
+    first = make_cache_key([png_bytes], "model-a", "openai", "high", "read")
+    assert first == make_cache_key([png_bytes], "model-a", "openai", "high", "read")
+    assert first != make_cache_key([png_bytes], "model-b", "openai", "high", "read")
+    assert first != make_cache_key([png_bytes], "model-a", "openai", "low", "read")
+    assert first != make_cache_key([png_bytes], "model-a", "openai", "high", "compare")
+    assert first != make_cache_key([png_bytes], "model-a", "anthropic", "high", "read")
 
 
 def test_image_id_is_content_addressed(png_bytes: bytes) -> None:
