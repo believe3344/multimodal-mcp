@@ -18,6 +18,8 @@
 
 返回结构化文字描述（OCR + 图表数据 + UI 细节），主模型基于描述自己推理。
 
+**稳定性处理**：所有图片来源先嗅探真实类型（非图片直接拒绝，不会把任意文件内容发给视觉 API）；超过 2048px 或 4MB 的图自动缩到长边 1568px 并重编码为 JPEG——视网膜全屏截图从几 MB 压到几百 KB，避免上游体积限制和超时。单源上限 64MB。每个阶段都写 stderr 日志（分辨率、体积、耗时），排查时看 MCP 服务器 stderr 输出即可。
+
 另一个工具 `multimodal_config_status` 自检三个 vision 变量是否配齐（不打印 key）。
 
 "剪贴板"路径解决客户端拦截粘贴图片的问题：截图后不粘贴到聊天框，打字说"看下我的截图"，工具直接读剪贴板。跨平台跨客户端。
@@ -187,6 +189,9 @@ npx @modelcontextprotocol/inspector .venv/bin/python server.py
 | GPT-5 系列超时 / 404 | 设 `VISION_API_STYLE=responses`（走 `/responses`，默认是 `/chat/completions`） |
 | `HTTP 401` | Key 错或没开通该模型 |
 | `HTTP 404` | BaseURL 不是 `/v1` 结尾，或 style 选错 |
+| 大图超时 / 间歇失败 | 已在服务端自动压缩；仍失败就看 MCP 服务器 stderr 日志里的体积与耗时 |
+| `not a supported image` | 输入不是图片文件（只支持 PNG/JPEG/GIF/WebP/BMP） |
+| `clipboard has no image` | 截图后别再复制其他内容；macOS 用 Cmd+Ctrl+Shift+4 才直接进剪贴板 |
 | 描述模糊 | `detail` 设 `high`，或自定义 `instruction` |
 | agent 不自动调 | 检查客户端是否加载 MCP、规则文件是否被读取 |
 

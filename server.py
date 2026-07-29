@@ -34,17 +34,22 @@ or, after `pipx install .`:
 from __future__ import annotations
 
 import base64
+import io
 import json
+import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
+import time
 from enum import Enum
 from typing import Any, Optional
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 # --------------------------------------------------------------------------- #
@@ -57,6 +62,24 @@ VISION_MODEL = os.getenv("VISION_MODEL", "").strip()
 VISION_API_STYLE = os.getenv("VISION_API_STYLE", "chat").strip().lower()
 
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "120") or "120")
+
+# --------------------------------------------------------------------------- #
+# Image limits. Oversized sources are the main cause of flaky recognition:     #
+# large retina screenshots blow past upstream payload limits or time out.      #
+# --------------------------------------------------------------------------- #
+MAX_SOURCE_BYTES = 64 * 1024 * 1024  # hard reject for any resolved source
+MAX_INLINE_BYTES = 4 * 1024 * 1024   # above this, re-encode before sending
+MAX_INLINE_EDGE = 2048               # above this (px), downscale before sending
+TARGET_EDGE = 1568                   # downscale target for the long edge
+
+# Diagnostics go to stderr only - stdout is reserved for the MCP transport.
+logger = logging.getLogger("multimodal-mcp")
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("[multimodal-mcp] %(levelname)s %(message)s"))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
 
 # --------------------------------------------------------------------------- #
@@ -148,17 +171,15 @@ async def _chat_completion(
         )
 
 
-def _build_image_content(image: str, text: str, detail: str = "high") -> list[dict[str, Any]]:
+def _build_image_content(
+    image_b64: str, mime: str, text: str, detail: str = "high"
+) -> list[dict[str, Any]]:
     """Build the multimodal user-content list for one image + text.
 
     Chat Completions uses `image_url` / `text`; Responses API uses
-    `input_image` / `input_text`. The image source can be an http(s) URL,
-    a data URI, or raw base64 (wrapped as PNG).
+    `input_image` / `input_text`. `mime` is the sniffed real type.
     """
-    if image.startswith(("http://", "https://", "data:")):
-        img_url = image
-    else:
-        img_url = f"data:image/png;base64,{image.strip()}"
+    img_url = f"data:{mime};base64,{image_b64}"
 
     if VISION_API_STYLE == "responses":
         return [
@@ -171,11 +192,11 @@ def _build_image_content(image: str, text: str, detail: str = "high") -> list[di
     ]
 
 
-def read_clipboard_image() -> tuple[Optional[str], Optional[str]]:
+def read_clipboard_image() -> tuple[Optional[bytes], Optional[str]]:
     """Read an image from the system clipboard. Cross-platform.
 
     Returns:
-        (base64_str, mime_type) on success, (None, None) if no image or
+        (raw_bytes, None) on success, (None, error_msg) if no image or
         clipboard helper not installed.
 
     Uses external CLI tools (no Python GUI deps):
@@ -205,7 +226,7 @@ def read_clipboard_image() -> tuple[Optional[str], Optional[str]]:
                     data = f.read()
                 if not data:
                     return None, "pngpaste returned empty file"
-                return base64.b64encode(data).decode(), "image/png"
+                return data, None
             finally:
                 try:
                     os.unlink(tmp_path)
@@ -222,7 +243,7 @@ def read_clipboard_image() -> tuple[Optional[str], Optional[str]]:
             )
             if proc.returncode != 0 or not proc.stdout:
                 return None, "xclip: clipboard has no image"
-            return base64.b64encode(proc.stdout).decode(), "image/png"
+            return proc.stdout, None
 
         elif system == "Windows":
             ps_script = (
@@ -241,10 +262,15 @@ def read_clipboard_image() -> tuple[Optional[str], Optional[str]]:
                 text=True,
                 timeout=10,
             )
-            out = proc.stdout.strip() if proc.stdout else ""
+            # PowerShell wraps stdout at console width; strip inner newlines
+            # or the base64 payload gets corrupted.
+            out = re.sub(r"\s+", "", proc.stdout or "")
             if not out:
                 return None, "powershell: clipboard has no image"
-            return out, "image/png"
+            try:
+                return base64.b64decode(out, validate=True), None
+            except Exception:
+                return None, "powershell: clipboard data is not valid base64"
 
         else:
             return None, f"unsupported platform: {system}"
@@ -265,64 +291,153 @@ def _config_status() -> dict[str, object]:
     }
 
 
-async def _resolve_image_source(image: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Resolve any image source to a base64 string.
+def _sniff_mime(data: bytes) -> Optional[str]:
+    """Detect the real image type from magic bytes."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith(b"BM"):
+        return "image/bmp"
+    return None
+
+
+def _normalize_image(data: bytes) -> tuple[Optional[bytes], Optional[str], Optional[str]]:
+    """Validate and, when oversized, downscale/re-encode an image.
+
+    Small images pass through untouched (zero quality loss). Large ones are
+    downscaled to TARGET_EDGE on the long edge and re-encoded as JPEG, which
+    keeps retina screenshots well under upstream payload limits.
+
+    Returns (bytes, mime, None) on success, (None, None, error_msg) on failure.
+    """
+    mime = _sniff_mime(data)
+    if mime is None:
+        return None, None, (
+            "source is not a supported image (PNG/JPEG/GIF/WebP/BMP); "
+            "refusing to send arbitrary file content to the vision API"
+        )
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            im.load()
+            if len(data) <= MAX_INLINE_BYTES and max(im.size) <= MAX_INLINE_EDGE:
+                return data, mime, None
+
+            orig_size = im.size
+            if getattr(im, "is_animated", False):
+                im.seek(0)
+            scale = TARGET_EDGE / max(im.size)
+            if scale < 1:
+                im = im.resize(
+                    (max(1, round(im.size[0] * scale)), max(1, round(im.size[1] * scale))),
+                    Image.LANCZOS,
+                )
+            if im.mode in ("RGBA", "LA", "P"):
+                # Flatten alpha onto white; JPEG has no alpha channel.
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                rgba = im.convert("RGBA")
+                bg.paste(rgba, mask=rgba.split()[-1])
+                im = bg
+            elif im.mode != "RGB":
+                im = im.convert("RGB")
+            out = b""
+            for quality in (85, 70, 55):
+                buf = io.BytesIO()
+                im.save(buf, format="JPEG", quality=quality, optimize=True)
+                out = buf.getvalue()
+                if len(out) <= MAX_INLINE_BYTES:
+                    break
+            logger.info(
+                "normalized image: %s %dx%d %.1fMB -> jpeg %dx%d %.1fMB",
+                mime, orig_size[0], orig_size[1], len(data) / 1e6,
+                im.size[0], im.size[1], len(out) / 1e6,
+            )
+            return out, "image/jpeg", None
+    except Exception as exc:  # noqa: BLE001 - corrupt/truncated images land here
+        return None, None, f"image decode failed: {type(exc).__name__}: {exc}"
+
+
+async def _resolve_image_source(image: Optional[str]) -> tuple[Optional[bytes], Optional[str]]:
+    """Resolve any image source to raw bytes.
 
     Dispatch order:
       1. None / empty      -> read from system clipboard (screenshots)
-      2. http(s) URL       -> download and base64-encode
-      3. data: URI         -> extract base64 part
-      4. existing file path -> read and base64-encode
+      2. http(s) URL       -> download (streamed, size-capped)
+      3. data: URI         -> decode base64 part
+      4. existing file path -> read from disk
       5. anything else    -> treat as raw base64 string
 
-    Returns (base64_str, None) on success, (None, error_msg) on failure.
+    Returns (raw_bytes, None) on success, (None, error_msg) on failure.
     """
     if not image:
-        b64, err = read_clipboard_image()
-        if not b64:
+        data, err = read_clipboard_image()
+        if not data:
             return None, err or "no image in clipboard"
-        return b64, None
+        source = "clipboard"
+    else:
+        src = image.strip()
 
-    src = image.strip()
+        if src.startswith(("http://", "https://")):
+            try:
+                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:
+                    async with client.stream("GET", src) as resp:
+                        resp.raise_for_status()
+                        chunks: list[bytes] = []
+                        total = 0
+                        async for chunk in resp.aiter_bytes(65536):
+                            total += len(chunk)
+                            if total > MAX_SOURCE_BYTES:
+                                return None, f"downloaded image exceeds {MAX_SOURCE_BYTES // (1024 * 1024)}MB limit"
+                            chunks.append(chunk)
+                        data = b"".join(chunks)
+                if not data:
+                    return None, "downloaded image is empty"
+            except httpx.HTTPStatusError as exc:
+                return None, f"download HTTP {exc.response.status_code}: {exc.response.text[:200]}"
+            except Exception as exc:  # noqa: BLE001
+                return None, f"download failed: {type(exc).__name__}: {exc}"
+            source = "url"
 
-    if src.startswith(("http://", "https://")):
-        try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:
-                resp = await client.get(src)
-                resp.raise_for_status()
-                data = resp.content
-            if not data:
-                return None, "downloaded image is empty"
-            return base64.b64encode(data).decode(), None
-        except httpx.HTTPStatusError as exc:
-            return None, f"download HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-        except Exception as exc:  # noqa: BLE001
-            return None, f"download failed: {type(exc).__name__}: {exc}"
+        elif src.startswith("data:"):
+            if "," not in src:
+                return None, "invalid data URI (missing comma)"
+            try:
+                data = base64.b64decode(re.sub(r"\s+", "", src.split(",", 1)[1]), validate=True)
+            except Exception:
+                return None, "invalid data URI (bad base64 payload)"
+            source = "data-uri"
 
-    if src.startswith("data:"):
-        if "," not in src:
-            return None, "invalid data URI (missing comma)"
-        return src.split(",", 1)[1], None
+        elif os.path.exists(src):
+            try:
+                if os.path.getsize(src) > MAX_SOURCE_BYTES:
+                    return None, f"file exceeds {MAX_SOURCE_BYTES // (1024 * 1024)}MB limit"
+                with open(src, "rb") as f:
+                    data = f.read()
+                if not data:
+                    return None, "file is empty"
+            except OSError as exc:
+                return None, f"read file failed: {type(exc).__name__}: {exc}"
+            source = "file"
 
-    if os.path.exists(src):
-        try:
-            with open(src, "rb") as f:
-                data = f.read()
-            if not data:
-                return None, "file is empty"
-            return base64.b64encode(data).decode(), None
-        except OSError as exc:
-            return None, f"read file failed: {type(exc).__name__}: {exc}"
+        else:
+            try:
+                data = base64.b64decode(re.sub(r"\s+", "", src), validate=True)
+            except Exception:
+                return None, (
+                    "input is not a URL, data URI, existing file path, or valid base64. "
+                    "Pass an http(s) URL, a data:image/...;base64,... URI, a local file "
+                    "path, raw base64, or leave empty to read from the system clipboard."
+                )
+            source = "base64"
 
-    try:
-        base64.b64decode(src, validate=True)
-    except Exception:
-        return None, (
-            "input is not a URL, data URI, existing file path, or valid base64. "
-            "Pass an http(s) URL, a data:image/...;base64,... URI, a local file "
-            "path, raw base64, or leave empty to read from the system clipboard."
-        )
-    return src, None
+    if len(data) > MAX_SOURCE_BYTES:
+        return None, f"{source} image exceeds {MAX_SOURCE_BYTES // (1024 * 1024)}MB limit"
+    logger.info("resolved image source: %s, %.2fMB", source, len(data) / 1e6)
+    return data, None
 
 
 def _fmt_error(stage: str, exc: Exception) -> str:
@@ -449,19 +564,33 @@ async def describe_image(
         - "识别 /tmp/chart.png 里的表格"               -> image="/tmp/chart.png"
         - "把这张流程图(base64)转成 Mermaid"            -> instruction="...", image=<b64>
     '''
-    image_b64, err = await _resolve_image_source(image)
-    if not image_b64:
+    raw, err = await _resolve_image_source(image)
+    if raw is None:
         return _fmt_error("describe_image", RuntimeError(err or "no image source"))
 
+    normalized, mime, nerr = _normalize_image(raw)
+    if normalized is None:
+        return _fmt_error("describe_image", RuntimeError(nerr or "image decode failed"))
+
+    image_b64 = base64.b64encode(normalized).decode()
     prompt = instruction or DEFAULT_VISION_PROMPT
-    content = _build_image_content(image_b64, prompt, detail.value)
+    content = _build_image_content(image_b64, mime or "image/png", prompt, detail.value)
     messages = [{"role": "user", "content": content}]
+    t0 = time.monotonic()
     try:
         description = await _chat_completion(
             VISION_BASE_URL, VISION_API_KEY, VISION_MODEL, messages
         )
     except Exception as exc:  # noqa: BLE001 - we surface any upstream failure
+        logger.error(
+            "upstream call failed after %.1fs (payload %.2fMB, model %s): %s",
+            time.monotonic() - t0, len(image_b64) / 1e6, VISION_MODEL or "(unset)", exc,
+        )
         return _fmt_error("describe_image", exc)
+    logger.info(
+        "upstream call ok: %.1fs, payload %.2fMB, reply %d chars",
+        time.monotonic() - t0, len(image_b64) / 1e6, len(description),
+    )
     return description
 
 
