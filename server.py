@@ -54,6 +54,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from state import MultimodalState, make_cache_key
 
+from pdf_support import MAX_PDF_PAGES, PdfMode, extract_pdf_pages
+
 # --------------------------------------------------------------------------- #
 # Configuration. Vision model only - the main reasoning model is the one the  #
 # user picked in their MCP client, not configured here.                        #
@@ -370,10 +372,7 @@ async def _resolve_image_source(image: Optional[str]) -> tuple[Optional[bytes], 
 
     Dispatch order:
       1. None / empty      -> read from system clipboard (screenshots)
-      2. http(s) URL       -> download (streamed, size-capped)
-      3. data: URI         -> decode base64 part
-      4. existing file path -> read from disk
-      5. anything else    -> treat as raw base64 string
+      2. anything else    -> delegate to _resolve_binary_source
 
     Returns (raw_bytes, None) on success, (None, error_msg) on failure.
     """
@@ -381,66 +380,56 @@ async def _resolve_image_source(image: Optional[str]) -> tuple[Optional[bytes], 
         data, err = read_clipboard_image()
         if not data:
             return None, err or "no image in clipboard"
-        source = "clipboard"
+        if len(data) > MAX_SOURCE_BYTES:
+            return None, f"clipboard image exceeds {MAX_SOURCE_BYTES // (1024 * 1024)}MB limit"
+        logger.info("resolved image source: clipboard, %.2fMB", len(data) / 1e6)
+        return data, None
+    return await _resolve_binary_source(image, max_bytes=MAX_SOURCE_BYTES)
+
+
+async def _resolve_binary_source(
+    source: str,
+    *,
+    max_bytes: int,
+) -> tuple[Optional[bytes], Optional[str]]:
+    src = source.strip()
+    if src.startswith(("http://", "https://")):
+        try:
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:
+                async with client.stream("GET", src) as response:
+                    response.raise_for_status()
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.aiter_bytes(65536):
+                        total += len(chunk)
+                        if total > max_bytes:
+                            return None, f"download exceeds {max_bytes // (1024 * 1024)}MB limit"
+                        chunks.append(chunk)
+            return b"".join(chunks), None
+        except httpx.HTTPStatusError as exc:
+            return None, f"download HTTP {exc.response.status_code}: {exc.response.text[:200]}"
+        except Exception as exc:
+            return None, f"download failed: {type(exc).__name__}: {exc}"
+    if src.startswith("data:"):
+        if "," not in src:
+            return None, "invalid data URI (missing comma)"
+        encoded = src.split(",", 1)[1]
+    elif os.path.exists(src):
+        try:
+            if os.path.getsize(src) > max_bytes:
+                return None, f"file exceeds {max_bytes // (1024 * 1024)}MB limit"
+            with open(src, "rb") as file:
+                return file.read(), None
+        except OSError as exc:
+            return None, f"read file failed: {type(exc).__name__}: {exc}"
     else:
-        src = image.strip()
-
-        if src.startswith(("http://", "https://")):
-            try:
-                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:
-                    async with client.stream("GET", src) as resp:
-                        resp.raise_for_status()
-                        chunks: list[bytes] = []
-                        total = 0
-                        async for chunk in resp.aiter_bytes(65536):
-                            total += len(chunk)
-                            if total > MAX_SOURCE_BYTES:
-                                return None, f"downloaded image exceeds {MAX_SOURCE_BYTES // (1024 * 1024)}MB limit"
-                            chunks.append(chunk)
-                        data = b"".join(chunks)
-                if not data:
-                    return None, "downloaded image is empty"
-            except httpx.HTTPStatusError as exc:
-                return None, f"download HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-            except Exception as exc:  # noqa: BLE001
-                return None, f"download failed: {type(exc).__name__}: {exc}"
-            source = "url"
-
-        elif src.startswith("data:"):
-            if "," not in src:
-                return None, "invalid data URI (missing comma)"
-            try:
-                data = base64.b64decode(re.sub(r"\s+", "", src.split(",", 1)[1]), validate=True)
-            except Exception:
-                return None, "invalid data URI (bad base64 payload)"
-            source = "data-uri"
-
-        elif os.path.exists(src):
-            try:
-                if os.path.getsize(src) > MAX_SOURCE_BYTES:
-                    return None, f"file exceeds {MAX_SOURCE_BYTES // (1024 * 1024)}MB limit"
-                with open(src, "rb") as f:
-                    data = f.read()
-                if not data:
-                    return None, "file is empty"
-            except OSError as exc:
-                return None, f"read file failed: {type(exc).__name__}: {exc}"
-            source = "file"
-
-        else:
-            try:
-                data = base64.b64decode(re.sub(r"\s+", "", src), validate=True)
-            except Exception:
-                return None, (
-                    "input is not a URL, data URI, existing file path, or valid base64. "
-                    "Pass an http(s) URL, a data:image/...;base64,... URI, a local file "
-                    "path, raw base64, or leave empty to read from the system clipboard."
-                )
-            source = "base64"
-
-    if len(data) > MAX_SOURCE_BYTES:
-        return None, f"{source} image exceeds {MAX_SOURCE_BYTES // (1024 * 1024)}MB limit"
-    logger.info("resolved image source: %s, %.2fMB", source, len(data) / 1e6)
+        encoded = src
+    try:
+        data = base64.b64decode(re.sub(r"\s+", "", encoded), validate=True)
+    except Exception:
+        return None, "source is not a URL, data URI, existing file path, or valid base64"
+    if len(data) > max_bytes:
+        return None, f"source exceeds {max_bytes // (1024 * 1024)}MB limit"
     return data, None
 
 
@@ -728,6 +717,68 @@ async def clear_multimodal_state(
 ) -> str:
     target = target if isinstance(target, StateTarget) else target.default
     return json.dumps(STATE.clear(target.value), ensure_ascii=False, indent=2)
+
+
+PDF_VISION_BATCH_SIZE = 4
+
+
+@mcp.tool(name="describe_pdf", annotations={"title": "Describe PDF", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True})
+async def describe_pdf(
+    document: str = Field(description="PDF source: URL, data URI, local path, or raw base64."),
+    pages: Optional[str] = Field(default=None, description="1-based selection such as '1-3,5'; default first 20 pages."),
+    mode: PdfMode = Field(default=PdfMode.AUTO),
+    instruction: Optional[str] = Field(default=None, description="OCR focus for visually processed pages."),
+    detail: DetailLevel = Field(default=DetailLevel.HIGH),
+) -> str:
+    instruction = instruction if isinstance(instruction, (str, type(None))) else instruction.default
+    detail = detail if isinstance(detail, DetailLevel) else detail.default
+    mode = mode if isinstance(mode, PdfMode) else mode.default
+    pages = pages if isinstance(pages, (str, type(None))) else pages.default
+    document = document if isinstance(document, str) else document.default
+
+    if not document.strip():
+        return _fmt_error("describe_pdf", ValueError("document is required"))
+    raw, err = await _resolve_binary_source(document, max_bytes=MAX_SOURCE_BYTES)
+    if raw is None:
+        return _fmt_error("describe_pdf", RuntimeError(err or "cannot read PDF"))
+    try:
+        pdf_pages = extract_pdf_pages(raw, pages, mode)
+        sections: list[str] = []
+        pending: list[tuple[int, tuple[bytes, str]]] = []
+        prompt = instruction or DEFAULT_VISION_PROMPT
+
+        async def flush_pending() -> None:
+            if not pending:
+                return
+            page_numbers = [number for number, _image in pending]
+            batch_prompt = (
+                f"以下图片依次对应 PDF 页码 {page_numbers}。必须以 `## Page N` "
+                f"作为每页输出的一级标题，按页码顺序输出。\n\n{prompt}"
+            )
+            result = await _describe_prepared_images(
+                [image for _number, image in pending],
+                batch_prompt,
+                detail,
+            )
+            sections.append(result)
+            pending.clear()
+
+        for page in pdf_pages:
+            if page.image is None:
+                await flush_pending()
+                text = page.text or f"[page {page.number} has no extractable text]"
+                sections.append(f"## Page {page.number}\n\n{text}")
+                continue
+            normalized, mime, nerr = _normalize_image(page.image)
+            if normalized is None or mime is None:
+                raise RuntimeError(f"page {page.number}: {nerr}")
+            pending.append((page.number, (normalized, mime)))
+            if len(pending) == PDF_VISION_BATCH_SIZE:
+                await flush_pending()
+        await flush_pending()
+        return "\n\n".join(sections)
+    except Exception as exc:
+        return _fmt_error("describe_pdf", exc)
 
 
 @mcp.tool(
