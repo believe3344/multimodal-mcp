@@ -33,6 +33,7 @@ or, after `pipx install .`:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -161,6 +162,51 @@ def _extract_responses_text(data: dict[str, Any]) -> str:
     return "\n".join(texts)
 
 
+RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+UPSTREAM_SEMAPHORE = asyncio.Semaphore(UPSTREAM_MAX_CONCURRENCY)
+UPSTREAM_TIMEOUT = httpx.Timeout(
+    connect=UPSTREAM_CONNECT_TIMEOUT,
+    read=UPSTREAM_READ_TIMEOUT,
+    write=UPSTREAM_READ_TIMEOUT,
+    pool=UPSTREAM_CONNECT_TIMEOUT,
+)
+
+
+async def _post_json_once(
+    client: httpx.AsyncClient,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+) -> httpx.Response:
+    return await client.post(url, json=payload, headers=headers)
+
+
+async def _post_json_with_retry(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+) -> httpx.Response:
+    async with UPSTREAM_SEMAPHORE:
+        async with httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT) as client:
+            for attempt in range(UPSTREAM_MAX_RETRIES + 1):
+                try:
+                    response = await _post_json_once(client, url, payload, headers)
+                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                    if attempt >= UPSTREAM_MAX_RETRIES:
+                        raise RuntimeError(
+                            f"upstream network failure after {attempt + 1} attempts: {exc}"
+                        ) from exc
+                else:
+                    if response.status_code not in RETRYABLE_STATUS_CODES:
+                        return response
+                    if attempt >= UPSTREAM_MAX_RETRIES:
+                        return response
+                delay = (2.0, 5.0)[min(attempt, 1)]
+                logger.warning("upstream retry %d in %.1fs: %s", attempt + 1, delay, url)
+                await asyncio.sleep(delay)
+    raise RuntimeError("unreachable retry state")
+
+
 async def _chat_completion(
     base_url: str,
     api_key: str,
@@ -192,14 +238,13 @@ async def _chat_completion(
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        resp = await client.post(url, json=payload, headers=headers)
-        if resp.status_code >= 400:
-            raise RuntimeError(
-                f"HTTP {resp.status_code} from {url} for model '{model}': "
-                f"{resp.text[:500]}"
-            )
-        data = resp.json()
+    resp = await _post_json_with_retry(url, payload, headers)
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"HTTP {resp.status_code} from {url} for model '{model}': "
+            f"{resp.text[:500]}"
+        )
+    data = resp.json()
 
     try:
         if VISION_API_STYLE == "responses":
