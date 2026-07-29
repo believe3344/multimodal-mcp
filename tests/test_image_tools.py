@@ -75,3 +75,40 @@ async def test_describe_images_reports_source_index(monkeypatch, png_bytes: byte
     result = await server.describe_images(images=["ok", "bad"])
     assert "image 2" in result
     assert "download failed" in result
+
+
+@pytest.mark.asyncio
+async def test_ask_image_reuses_stored_image(monkeypatch, png_bytes: bytes) -> None:
+    state = MultimodalState()
+    image_id = state.put_image(png_bytes, "image/png")
+    prompts = []
+
+    async def fake_describe(images, prompt, detail):
+        prompts.append((images, prompt, detail))
+        return "answer"
+
+    monkeypatch.setattr(server, "STATE", state)
+    monkeypatch.setattr(server, "_describe_prepared_images", fake_describe)
+    result = await server.ask_image(image_id=image_id, question="What is the total?")
+    assert result == "answer"
+    assert prompts[0][0] == [(png_bytes, "image/png")]
+    assert prompts[0][1] == "What is the total?"
+
+
+@pytest.mark.asyncio
+async def test_ask_image_rejects_unknown_id(monkeypatch) -> None:
+    monkeypatch.setattr(server, "STATE", MultimodalState())
+    result = await server.ask_image(image_id="img_missing", question="What?")
+    assert "expired or does not exist" in result
+
+
+@pytest.mark.asyncio
+async def test_cache_status_and_clear(monkeypatch, png_bytes: bytes) -> None:
+    state = MultimodalState()
+    state.put_cached("key", "value")
+    state.put_image(png_bytes, "image/png")
+    monkeypatch.setattr(server, "STATE", state)
+    assert '"cache_entries": 1' in await server.multimodal_cache_status()
+    result = await server.clear_multimodal_state(server.StateTarget.ALL)
+    assert '"cache_entries_removed": 1' in result
+    assert state.stats()["image_entries"] == 0

@@ -519,6 +519,12 @@ class DetailLevel(str, Enum):
     HIGH = "high"
 
 
+class StateTarget(str, Enum):
+    CACHE = "cache"
+    IMAGES = "images"
+    ALL = "all"
+
+
 # --------------------------------------------------------------------------- #
 # Tool.                                                                        #
 # --------------------------------------------------------------------------- #
@@ -690,6 +696,38 @@ async def describe_images(
         return await _describe_prepared_images(prepared, prompt, detail)
     except Exception as exc:
         return _fmt_error("describe_images", exc)
+
+
+@mcp.tool(name="ask_image", annotations={"title": "Ask About Stored Image", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True})
+async def ask_image(
+    image_id: str = Field(description="Image ID returned by describe_image, describe_images, or describe_pdf."),
+    question: str = Field(description="Focused follow-up question, up to 4000 characters."),
+    detail: DetailLevel = Field(default=DetailLevel.HIGH),
+) -> str:
+    detail = detail if isinstance(detail, DetailLevel) else detail.default
+    question = question.strip()
+    if not question or len(question) > 4000:
+        return _fmt_error("ask_image", ValueError("question must contain 1 to 4000 characters"))
+    entry = STATE.get_image(image_id)
+    if entry is None:
+        return _fmt_error("ask_image", RuntimeError("image_id expired or does not exist; describe the image again"))
+    try:
+        return await _describe_prepared_images([(entry.data, entry.mime)], question, detail)
+    except Exception as exc:
+        return _fmt_error("ask_image", exc)
+
+
+@mcp.tool(name="multimodal_cache_status", annotations={"title": "Multimodal Cache Status", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def multimodal_cache_status() -> str:
+    return json.dumps(STATE.stats(), ensure_ascii=False, indent=2)
+
+
+@mcp.tool(name="clear_multimodal_state", annotations={"title": "Clear Multimodal State", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False})
+async def clear_multimodal_state(
+    target: StateTarget = Field(default=StateTarget.ALL),
+) -> str:
+    target = target if isinstance(target, StateTarget) else target.default
+    return json.dumps(STATE.clear(target.value), ensure_ascii=False, indent=2)
 
 
 @mcp.tool(
