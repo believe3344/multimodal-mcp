@@ -1,6 +1,7 @@
 import pytest
 
 import server
+from jobs import JobManager
 from state import MultimodalState
 
 
@@ -18,6 +19,11 @@ async def test_describe_image_caches_and_returns_image_id(monkeypatch, png_bytes
     monkeypatch.setattr(server, "_resolve_image_source", fake_resolve)
     monkeypatch.setattr(server, "_chat_completion", fake_chat)
     monkeypatch.setattr(server, "STATE", MultimodalState())
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
 
     first = await server.describe_image(image="ignored")
     second = await server.describe_image(image="ignored")
@@ -49,6 +55,11 @@ async def test_describe_images_sends_images_in_order(monkeypatch, png_bytes: byt
     monkeypatch.setattr(server, "_normalize_image", fake_normalize)
     monkeypatch.setattr(server, "_chat_completion", fake_chat)
     monkeypatch.setattr(server, "STATE", MultimodalState())
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
 
     result = await server.describe_images(images=["first", "second"])
     urls = [part["image_url"]["url"] for part in captured if part["type"] == "image_url"]
@@ -72,6 +83,11 @@ async def test_describe_images_reports_source_index(monkeypatch, png_bytes: byte
         return png_bytes, None
 
     monkeypatch.setattr(server, "_resolve_image_source", fake_resolve)
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
     result = await server.describe_images(images=["ok", "bad"])
     assert "image 2" in result
     assert "download failed" in result
@@ -88,7 +104,13 @@ async def test_ask_image_reuses_stored_image(monkeypatch, png_bytes: bytes) -> N
         return "answer"
 
     monkeypatch.setattr(server, "STATE", state)
-    monkeypatch.setattr(server, "_describe_prepared_images", fake_describe)
+    monkeypatch.setattr(server.RUNNER, "get_image", state.get_image)
+    monkeypatch.setattr(server.RUNNER, "describe_images", fake_describe)
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
     result = await server.ask_image(image_id=image_id, question="What is the total?")
     assert result == "answer"
     assert prompts[0][0] == [(png_bytes, "image/png")]
@@ -98,6 +120,11 @@ async def test_ask_image_reuses_stored_image(monkeypatch, png_bytes: bytes) -> N
 @pytest.mark.asyncio
 async def test_ask_image_rejects_unknown_id(monkeypatch) -> None:
     monkeypatch.setattr(server, "STATE", MultimodalState())
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
     result = await server.ask_image(image_id="img_missing", question="What?")
     assert "expired or does not exist" in result
 

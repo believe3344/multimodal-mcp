@@ -3,6 +3,7 @@ import base64
 import pytest
 
 import server
+from jobs import JobManager
 from pdf_support import PdfPage
 from state import MultimodalState
 
@@ -14,6 +15,11 @@ async def test_describe_pdf_returns_digital_text_without_vision(monkeypatch, dig
 
     monkeypatch.setattr(server, "_chat_completion", fail_if_called)
     monkeypatch.setattr(server, "STATE", MultimodalState())
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
     source = base64.b64encode(digital_pdf_bytes).decode()
     result = await server.describe_pdf(document=source)
     assert "## Page 1" in result
@@ -30,6 +36,11 @@ async def test_describe_pdf_uses_vision_for_scanned_pages(monkeypatch, scanned_p
 
     monkeypatch.setattr(server, "_describe_prepared_images", fake_describe)
     monkeypatch.setattr(server, "STATE", MultimodalState())
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
     source = base64.b64encode(scanned_pdf_bytes).decode()
     result = await server.describe_pdf(document=source)
     assert len(calls) == 1
@@ -59,8 +70,13 @@ async def test_describe_pdf_preserves_mixed_page_order(monkeypatch, png_bytes: b
     async def fake_describe(_images, _prompt, _detail):
         return "## Page 2\n\nsecond scanned page"
 
-    monkeypatch.setattr(server, "_resolve_binary_source", fake_resolve)
-    monkeypatch.setattr(server, "extract_pdf_pages", fake_extract)
-    monkeypatch.setattr(server, "_describe_prepared_images", fake_describe)
+    monkeypatch.setattr(server.RUNNER, "resolve_binary", fake_resolve)
+    monkeypatch.setattr(server.RUNNER, "extract_pdf", fake_extract)
+    monkeypatch.setattr(server.RUNNER, "describe_images", fake_describe)
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
     result = await server.describe_pdf(document="ignored")
     assert result.index("## Page 1") < result.index("## Page 2") < result.index("## Page 3")

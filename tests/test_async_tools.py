@@ -64,3 +64,45 @@ async def test_cancel_recognition(monkeypatch) -> None:
     await asyncio.sleep(0)
     status = json.loads(await server.get_recognition(started["job_id"]))
     assert status["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_compat_tool_returns_result_when_job_finishes_quickly(monkeypatch) -> None:
+    async def fake_run(job, request):
+        job.set_total_units(1)
+        job.complete_unit("image", "quick result")
+        return "quick result"
+
+    monkeypatch.setattr(server.RUNNER, "run", fake_run)
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
+    assert await server.describe_image(image="image") == "quick result"
+
+
+@pytest.mark.asyncio
+async def test_compat_tool_returns_job_without_cancelling_slow_task(monkeypatch) -> None:
+    release = asyncio.Event()
+
+    async def fake_run(job, request):
+        job.set_total_units(1)
+        await release.wait()
+        job.complete_unit("image", "late result")
+        return "late result"
+
+    monkeypatch.setattr(server.RUNNER, "run", fake_run)
+    monkeypatch.setattr(server, "SYNC_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
+    response = json.loads(await server.describe_image(image="image"))
+    assert response["status"] == "processing"
+    release.set()
+    completed = json.loads(
+        await server.get_recognition(response["job_id"], wait_seconds=1)
+    )
+    assert completed["result"] == "late result"

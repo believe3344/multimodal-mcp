@@ -44,7 +44,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 from enum import Enum
 from typing import Any, Optional
 
@@ -655,6 +654,34 @@ def _submit_request(request: RecognitionRequest):
     return JOBS.submit(kind=request.kind, dedupe_key=key, runner=execute)
 
 
+async def _wait_for_compat_result(job) -> str:
+    completed = await JOBS.wait(job.job_id, SYNC_WAIT_SECONDS)
+    snapshot = JOBS.snapshot(job.job_id)
+    if completed and snapshot["status"] in {"completed", "partial"}:
+        return str(snapshot.get("result", ""))
+    if completed and snapshot["status"] in {"failed", "cancelled"}:
+        raise RuntimeError(str(snapshot.get("error", snapshot["status"])))
+    return json.dumps(
+        {
+            "status": snapshot["status"],
+            "job_id": job.job_id,
+            "message": "识别仍在后台进行，请调用 get_recognition",
+            "completed_units": snapshot["completed_units"],
+            "total_units": snapshot["total_units"],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+async def _run_compat_request(stage: str, request: RecognitionRequest) -> str:
+    try:
+        job = _submit_request(request)
+        return await _wait_for_compat_result(job)
+    except Exception as exc:
+        return _fmt_error(stage, exc)
+
+
 # --------------------------------------------------------------------------- #
 # Tool.                                                                        #
 # --------------------------------------------------------------------------- #
@@ -769,25 +796,13 @@ async def describe_image(
     instruction = instruction if isinstance(instruction, (str, type(None))) else instruction.default
     detail = detail if isinstance(detail, DetailLevel) else detail.default
 
-    prepared, err = await _prepare_image(image)
-    if prepared is None:
-        return _fmt_error("describe_image", RuntimeError(err or "no image source"))
-
-    prompt = instruction or DEFAULT_VISION_PROMPT
-    t0 = time.monotonic()
-    try:
-        description = await _describe_prepared_images([prepared], prompt, detail)
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "upstream call failed after %.1fs (model %s): %s",
-            time.monotonic() - t0, VISION_MODEL or "(unset)", exc,
-        )
-        return _fmt_error("describe_image", exc)
-    logger.info(
-        "describe_image ok: %.1fs, reply %d chars",
-        time.monotonic() - t0, len(description),
+    request = RecognitionRequest(
+        kind="image",
+        sources=[image or ""],
+        instruction=instruction or DEFAULT_VISION_PROMPT,
+        detail=detail.value,
     )
-    return description
+    return await _run_compat_request("describe_image", request)
 
 
 @mcp.tool(
@@ -808,24 +823,16 @@ async def describe_images(
     instruction = instruction if isinstance(instruction, (str, type(None))) else instruction.default
     detail = detail if isinstance(detail, DetailLevel) else detail.default
 
-    if not 1 <= len(images) <= MAX_BATCH_IMAGES:
-        return _fmt_error("describe_images", ValueError("requires 1 to 8 images"))
-    if sum(not item.strip() for item in images) > 1:
-        return _fmt_error("describe_images", ValueError("only one clipboard image is allowed"))
-    prepared: list[tuple[bytes, str]] = []
-    for index, source in enumerate(images, start=1):
-        item, err = await _prepare_image(source or None)
-        if item is None:
-            return _fmt_error("describe_images", RuntimeError(f"image {index}: {err}"))
-        prepared.append(item)
-    prompt = instruction or (
-        "请按输入顺序联合描述这些图片。先分别转录每张图的文字和关键细节，"
-        "再指出图片之间的相同点、差异和连续关系。不要省略数字。"
+    request = RecognitionRequest(
+        kind="images",
+        sources=images,
+        instruction=instruction or (
+            "请按输入顺序联合描述这些图片。先分别转录每张图的文字和关键细节，"
+            "再指出图片之间的相同点、差异和连续关系。不要省略数字。"
+        ),
+        detail=detail.value,
     )
-    try:
-        return await _describe_prepared_images(prepared, prompt, detail)
-    except Exception as exc:
-        return _fmt_error("describe_images", exc)
+    return await _run_compat_request("describe_images", request)
 
 
 @mcp.tool(name="ask_image", annotations={"title": "Ask About Stored Image", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True})
@@ -836,15 +843,14 @@ async def ask_image(
 ) -> str:
     detail = detail if isinstance(detail, DetailLevel) else detail.default
     question = question.strip()
-    if not question or len(question) > 4000:
-        return _fmt_error("ask_image", ValueError("question must contain 1 to 4000 characters"))
-    entry = STATE.get_image(image_id)
-    if entry is None:
-        return _fmt_error("ask_image", RuntimeError("image_id expired or does not exist; describe the image again"))
-    try:
-        return await _describe_prepared_images([(entry.data, entry.mime)], question, detail)
-    except Exception as exc:
-        return _fmt_error("ask_image", exc)
+
+    request = RecognitionRequest(
+        kind="image_id",
+        sources=[image_id],
+        instruction=question,
+        detail=detail.value,
+    )
+    return await _run_compat_request("ask_image", request)
 
 
 @mcp.tool(name="multimodal_cache_status", annotations={"title": "Multimodal Cache Status", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
@@ -858,9 +864,6 @@ async def clear_multimodal_state(
 ) -> str:
     target = target if isinstance(target, StateTarget) else target.default
     return json.dumps(STATE.clear(target.value), ensure_ascii=False, indent=2)
-
-
-PDF_VISION_BATCH_SIZE = 4
 
 
 @mcp.tool(name="describe_pdf", annotations={"title": "Describe PDF", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True})
@@ -877,49 +880,15 @@ async def describe_pdf(
     pages = pages if isinstance(pages, (str, type(None))) else pages.default
     document = document if isinstance(document, str) else document.default
 
-    if not document.strip():
-        return _fmt_error("describe_pdf", ValueError("document is required"))
-    raw, err = await _resolve_binary_source(document, max_bytes=MAX_SOURCE_BYTES)
-    if raw is None:
-        return _fmt_error("describe_pdf", RuntimeError(err or "cannot read PDF"))
-    try:
-        pdf_pages = extract_pdf_pages(raw, pages, mode)
-        sections: list[str] = []
-        pending: list[tuple[int, tuple[bytes, str]]] = []
-        prompt = instruction or DEFAULT_VISION_PROMPT
-
-        async def flush_pending() -> None:
-            if not pending:
-                return
-            page_numbers = [number for number, _image in pending]
-            batch_prompt = (
-                f"以下图片依次对应 PDF 页码 {page_numbers}。必须以 `## Page N` "
-                f"作为每页输出的一级标题，按页码顺序输出。\n\n{prompt}"
-            )
-            result = await _describe_prepared_images(
-                [image for _number, image in pending],
-                batch_prompt,
-                detail,
-            )
-            sections.append(result)
-            pending.clear()
-
-        for page in pdf_pages:
-            if page.image is None:
-                await flush_pending()
-                text = page.text or f"[page {page.number} has no extractable text]"
-                sections.append(f"## Page {page.number}\n\n{text}")
-                continue
-            normalized, mime, nerr = _normalize_image(page.image)
-            if normalized is None or mime is None:
-                raise RuntimeError(f"page {page.number}: {nerr}")
-            pending.append((page.number, (normalized, mime)))
-            if len(pending) == PDF_VISION_BATCH_SIZE:
-                await flush_pending()
-        await flush_pending()
-        return "\n\n".join(sections)
-    except Exception as exc:
-        return _fmt_error("describe_pdf", exc)
+    request = RecognitionRequest(
+        kind="pdf",
+        sources=[document],
+        instruction=instruction or DEFAULT_VISION_PROMPT,
+        detail=detail.value,
+        pages=pages,
+        pdf_mode=mode.value,
+    )
+    return await _run_compat_request("describe_pdf", request)
 
 
 @mcp.tool(name="start_recognition", annotations={"title": "Start Recognition", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True})
