@@ -57,6 +57,9 @@ from state import MultimodalState, make_cache_key
 
 from pdf_support import MAX_PDF_PAGES, PdfMode, extract_pdf_pages
 
+from jobs import JobManager
+from recognition import RecognitionRequest, RecognitionRunner
+
 # --------------------------------------------------------------------------- #
 # Configuration. Vision model only - the main reasoning model is the one the  #
 # user picked in their MCP client, not configured here.                        #
@@ -565,6 +568,35 @@ async def _describe_prepared_images(
     )
     STATE.put_cached(cache_key, description)
     return _append_meta(description, image_ids=image_ids, cache_hit=False)
+
+
+async def _describe_for_runner(
+    images: list[tuple[bytes, str]],
+    prompt: str,
+    detail: str,
+) -> str:
+    return await _describe_prepared_images(images, prompt, DetailLevel(detail))
+
+
+def _extract_pdf_for_runner(raw: bytes, pages: Optional[str], mode: str):
+    return extract_pdf_pages(raw, pages, PdfMode(mode))
+
+
+RUNNER = RecognitionRunner(
+    prepare_image=_prepare_image,
+    describe_images=_describe_for_runner,
+    get_image=STATE.get_image,
+    resolve_binary=_resolve_binary_source,
+    extract_pdf=_extract_pdf_for_runner,
+    normalize_image=_normalize_image,
+    max_source_bytes=MAX_SOURCE_BYTES,
+)
+
+JOBS = JobManager(
+    result_ttl=JOB_RESULT_TTL_SECONDS,
+    max_entries=JOB_MAX_ENTRIES,
+    total_timeout=JOB_TOTAL_TIMEOUT_SECONDS,
+)
 
 
 MAX_BATCH_IMAGES = 8
