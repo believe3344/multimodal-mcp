@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
@@ -86,3 +87,57 @@ class RecognitionRunner:
         if request.kind == "pdf":
             return await self._run_pdf(job, request)
         raise ValueError(f"unsupported recognition kind: {request.kind}")
+
+    async def _run_pdf(self, job: RecognitionJob, request: RecognitionRequest) -> str:
+        if self.resolve_binary is None or self.extract_pdf is None or self.normalize_image is None:
+            raise RuntimeError("PDF support is unavailable")
+        raw, error = await self.resolve_binary(
+            request.sources[0], max_bytes=self.max_source_bytes
+        )
+        if raw is None:
+            raise RuntimeError(error or "cannot read PDF")
+        pages = self.extract_pdf(raw, request.pages, request.pdf_mode)
+        job.set_total_units(len(pages))
+        page_order = [page.number for page in pages]
+        ordered: dict[int, str] = {}
+        tasks: list[tuple[int, Awaitable[str]]] = []
+        for page in pages:
+            unit_id = f"page_{page.number}"
+            if page.image is None:
+                text = page.text or f"[page {page.number} has no extractable text]"
+                section = f"## Page {page.number}\n\n{text}"
+                ordered[page.number] = section
+                job.complete_unit(unit_id, section)
+                continue
+            normalized, mime, normalize_error = self.normalize_image(page.image)
+            if normalized is None or mime is None:
+                message = normalize_error or "image normalization failed"
+                section = f"## Page {page.number}\n\n[recognition failed: {message}]"
+                ordered[page.number] = section
+                job.fail_unit(unit_id, message)
+                continue
+
+            async def recognize_page(
+                number: int = page.number,
+                image: tuple[bytes, str] = (normalized, mime),
+            ) -> str:
+                try:
+                    result = await self.describe_images(
+                        [image], request.instruction, request.detail
+                    )
+                    section = f"## Page {number}\n\n{result}"
+                    job.complete_unit(f"page_{number}", section)
+                    return section
+                except Exception as exc:
+                    message = f"{type(exc).__name__}: {exc}"
+                    job.fail_unit(f"page_{number}", message)
+                    return f"## Page {number}\n\n[recognition failed: {message}]"
+
+            tasks.append((page.number, recognize_page()))
+        if tasks:
+            results = await asyncio.gather(
+                *(task for _number, task in tasks)
+            )
+            for (number, _task), result in zip(tasks, results):
+                ordered[number] = result
+        return "\n\n".join(ordered[number] for number in page_order)
