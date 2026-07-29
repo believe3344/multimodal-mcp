@@ -48,3 +48,12 @@ def test_clear_is_targeted(png_bytes: bytes) -> None:
     assert state.stats()["image_entries"] == 1
     state.clear("images")
     assert state.stats()["image_entries"] == 0
+
+
+def test_peek_cached_does_not_change_hit_or_miss_counters() -> None:
+    state = MultimodalState()
+    state.put_cached("known", "value")
+    assert state.peek_cached("known") == "value"
+    assert state.peek_cached("missing") is None
+    assert state.stats()["cache_hits"] == 0
+    assert state.stats()["cache_misses"] == 0

@@ -82,6 +82,15 @@ class MultimodalState:
                 self._image_bytes -= len(entry.data)
                 del self._images[image_id]
 
+    def peek_cached(self, key: str) -> Optional[str]:
+        with self._lock:
+            self._purge_expired()
+            entry = self._cache.get(key)
+            if entry is None:
+                return None
+            self._cache.move_to_end(key)
+            return entry.value
+
     def get_cached(self, key: str) -> Optional[str]:
         with self._lock:
             self._purge_expired()

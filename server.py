@@ -65,6 +65,41 @@ VISION_API_KEY = os.getenv("VISION_API_KEY", "").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "").strip()
 VISION_API_STYLE = os.getenv("VISION_API_STYLE", "chat").strip().lower()
 
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+        if value <= 0:
+            raise ValueError
+        return value
+    except ValueError:
+        logging.getLogger("multimodal-mcp").warning(
+            "invalid %s; using %.1f", name, default
+        )
+        return default
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+        if value <= 0:
+            raise ValueError
+        return value
+    except ValueError:
+        logging.getLogger("multimodal-mcp").warning(
+            "invalid %s; using %d", name, default
+        )
+        return default
+
+
+SYNC_WAIT_SECONDS = _positive_float_env("SYNC_WAIT_SECONDS", 20.0)
+POLL_WAIT_MAX_SECONDS = _positive_float_env("POLL_WAIT_MAX_SECONDS", 30.0)
+UPSTREAM_CONNECT_TIMEOUT = _positive_float_env("UPSTREAM_CONNECT_TIMEOUT", 10.0)
+UPSTREAM_READ_TIMEOUT = _positive_float_env("UPSTREAM_READ_TIMEOUT", 90.0)
+UPSTREAM_MAX_RETRIES = _positive_int_env("UPSTREAM_MAX_RETRIES", 2)
+UPSTREAM_MAX_CONCURRENCY = _positive_int_env("UPSTREAM_MAX_CONCURRENCY", 2)
+JOB_TOTAL_TIMEOUT_SECONDS = _positive_float_env("JOB_TOTAL_TIMEOUT_SECONDS", 900.0)
+JOB_RESULT_TTL_SECONDS = _positive_float_env("JOB_RESULT_TTL_SECONDS", 3600.0)
+JOB_MAX_ENTRIES = _positive_int_env("JOB_MAX_ENTRIES", 64)
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "120") or "120")
 
 # --------------------------------------------------------------------------- #
