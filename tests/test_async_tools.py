@@ -106,3 +106,19 @@ async def test_compat_tool_returns_job_without_cancelling_slow_task(monkeypatch)
         await server.get_recognition(response["job_id"], wait_seconds=1)
     )
     assert completed["result"] == "late result"
+
+
+@pytest.mark.asyncio
+async def test_cache_status_reports_jobs_and_clear_all_cancels_them(monkeypatch) -> None:
+    async def fake_run(job, request):
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    manager = JobManager(result_ttl=60, max_entries=8, total_timeout=5)
+    monkeypatch.setattr(server.RUNNER, "run", fake_run)
+    monkeypatch.setattr(server, "JOBS", manager)
+    await server.start_recognition(kind=server.RecognitionKind.IMAGE, sources=["x"])
+    status = json.loads(await server.multimodal_cache_status())
+    assert status["jobs"]["active"] == 1
+    cleared = json.loads(await server.clear_multimodal_state(server.StateTarget.ALL))
+    assert cleared["jobs_cancelled"] == 1

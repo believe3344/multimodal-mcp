@@ -135,7 +135,13 @@ async def test_cache_status_and_clear(monkeypatch, png_bytes: bytes) -> None:
     state.put_cached("key", "value")
     state.put_image(png_bytes, "image/png")
     monkeypatch.setattr(server, "STATE", state)
-    assert '"cache_entries": 1' in await server.multimodal_cache_status()
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
+    status = await server.multimodal_cache_status()
+    assert '"cache_entries": 1' in status
     result = await server.clear_multimodal_state(server.StateTarget.ALL)
     assert '"cache_entries_removed": 1' in result
     assert state.stats()["image_entries"] == 0

@@ -12,7 +12,10 @@
 | `describe_images` | 1-8 张图片联合识别或比较 |
 | `describe_pdf` | 数字 PDF 文本提取、扫描页视觉识别 |
 | `ask_image` | 使用 `image_id` 对图片继续提问 |
-| `multimodal_cache_status` | 查看缓存命中与内存占用 |
+| `start_recognition` | 启动图片、多图、PDF 或 image_id 后台识别 |
+| `get_recognition` | 查询任务进度，支持最多 30 秒长轮询 |
+| `cancel_recognition` | 取消后台识别任务 |
+| `multimodal_cache_status` | 查看缓存命中、任务与内存占用 |
 | `clear_multimodal_state` | 清理描述缓存或短期图片会话 |
 
 `describe_image` 的 `image` 参数自动判断图片来源：
@@ -30,6 +33,8 @@
 **稳定性处理**：所有图片来源先嗅探真实类型（非图片直接拒绝，不会把任意文件内容发给视觉 API）；超过 2048px 或 4MB 的图自动缩到长边 1568px 并重编码为 JPEG——视网膜全屏截图从几 MB 压到几百 KB，避免上游体积限制和超时。单源上限 64MB。每个阶段都写 stderr 日志（分辨率、体积、耗时），排查时看 MCP 服务器 stderr 输出即可。
 
 **缓存与生命周期**：描述缓存 TTL 1 小时，图片会话 TTL 30 分钟。数据仅在进程内存中，重启即清空。PDF 每次最多处理 20 页，多图最多 8 张。
+
+**后台识别**：现有 `describe_*` 工具最多同步等待 20 秒。未完成时返回 `job_id`，任务仍在后台运行；调用 `get_recognition(job_id, wait_seconds=15)` 获取进度。任务结果保留 1 小时，进程重启后失效。最多并发两个视觉请求，瞬态错误自动重试两次。
 
 `multimodal_config_status` 自检三个 vision 变量是否配齐（不打印 key）。
 

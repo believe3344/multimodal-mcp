@@ -61,6 +61,10 @@ RULES_BLOCK = f"""{RULES_MARKER_START}
 7. `describe_image`、`describe_images` 和扫描 PDF 会返回 `image_id`。用户对刚才的图片继续追问时，优先调用 `ask_image(image_id, question)`，不要要求用户重新上传。
 
 8. `image_id` 只在当前 MCP 进程内短期有效；过期后重新调用原识别工具。不要把 `image_id` 当永久文件标识。
+
+9. 如果 describe 工具返回 `status: processing` 和 `job_id`，不要再次调用 describe 工具。使用 `get_recognition(job_id, wait_seconds=15)` 轮询直到状态为 completed、partial、failed 或 cancelled。
+
+10. 当 PDF 任务返回 partial 结果时，用已完成页面回答用户问题，并清晰报告失败页码。只在用户要求时重试失败页。
 {RULES_MARKER_END}
 """
 

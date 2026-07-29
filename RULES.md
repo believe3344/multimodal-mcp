@@ -49,8 +49,16 @@ client reads its rules.
    the user to upload the image again.
 
 8. `image_id` is only valid within the current MCP process (30 minute TTL).
-   If expired, re-call the original description tool. Never treat `image_id`
-   as a permanent file identifier.
+    If expired, re-call the original description tool. Never treat `image_id`
+    as a permanent file identifier.
+
+9. If a describe tool returns `status: processing` and a `job_id`, do not
+   call the describe tool again. Call `get_recognition(job_id, wait_seconds=15)`
+   until the status is completed, partial, failed, or cancelled.
+
+10. When a PDF task returns partial results, answer from completed pages and
+    clearly report failed page numbers. Retry only failed pages when the user
+    asks.
 
 ## Where each client reads its rules
 

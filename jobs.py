@@ -189,3 +189,25 @@ class JobManager:
         if include_partial:
             payload["units"] = [unit.__dict__.copy() for unit in job.units.values()]
         return payload
+
+    def stats(self) -> dict[str, int]:
+        self._purge()
+        active = sum(
+            job.status in {JobStatus.QUEUED, JobStatus.PROCESSING}
+            for job in self._jobs.values()
+        )
+        return {
+            "entries": len(self._jobs),
+            "active": active,
+            "terminal": len(self._jobs) - active,
+        }
+
+    def clear(self) -> int:
+        cancelled = 0
+        for job in self._jobs.values():
+            if job.task is not None and not job.task.done():
+                job.task.cancel()
+                cancelled += 1
+        self._jobs.clear()
+        self._dedupe.clear()
+        return cancelled

@@ -855,7 +855,11 @@ async def ask_image(
 
 @mcp.tool(name="multimodal_cache_status", annotations={"title": "Multimodal Cache Status", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
 async def multimodal_cache_status() -> str:
-    return json.dumps(STATE.stats(), ensure_ascii=False, indent=2)
+    return json.dumps(
+        {"state": STATE.stats(), "jobs": JOBS.stats()},
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 @mcp.tool(name="clear_multimodal_state", annotations={"title": "Clear Multimodal State", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False})
@@ -863,7 +867,13 @@ async def clear_multimodal_state(
     target: StateTarget = Field(default=StateTarget.ALL),
 ) -> str:
     target = target if isinstance(target, StateTarget) else target.default
-    return json.dumps(STATE.clear(target.value), ensure_ascii=False, indent=2)
+    cleared = STATE.clear(target.value)
+    jobs_cancelled = 0
+    if target.value == "all":
+        jobs_cancelled = JOBS.clear()
+    result = dict(cleared)
+    result["jobs_cancelled"] = jobs_cancelled
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 @mcp.tool(name="describe_pdf", annotations={"title": "Describe PDF", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True})
