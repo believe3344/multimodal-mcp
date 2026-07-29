@@ -498,6 +498,19 @@ async def _describe_prepared_images(
     return _append_meta(description, image_ids=image_ids, cache_hit=False)
 
 
+MAX_BATCH_IMAGES = 8
+
+
+async def _prepare_image(source: Optional[str]) -> tuple[Optional[tuple[bytes, str]], Optional[str]]:
+    raw, err = await _resolve_image_source(source)
+    if raw is None:
+        return None, err or "no image source"
+    normalized, mime, nerr = _normalize_image(raw)
+    if normalized is None or mime is None:
+        return None, nerr or "image decode failed"
+    return (normalized, mime), None
+
+
 # --------------------------------------------------------------------------- #
 # Input model.                                                                #
 # --------------------------------------------------------------------------- #
@@ -620,20 +633,14 @@ async def describe_image(
     instruction = instruction if isinstance(instruction, (str, type(None))) else instruction.default
     detail = detail if isinstance(detail, DetailLevel) else detail.default
 
-    raw, err = await _resolve_image_source(image)
-    if raw is None:
+    prepared, err = await _prepare_image(image)
+    if prepared is None:
         return _fmt_error("describe_image", RuntimeError(err or "no image source"))
-
-    normalized, mime, nerr = _normalize_image(raw)
-    if normalized is None or mime is None:
-        return _fmt_error("describe_image", RuntimeError(nerr or "image decode failed"))
 
     prompt = instruction or DEFAULT_VISION_PROMPT
     t0 = time.monotonic()
     try:
-        description = await _describe_prepared_images(
-            [(normalized, mime)], prompt, detail
-        )
+        description = await _describe_prepared_images([prepared], prompt, detail)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "upstream call failed after %.1fs (model %s): %s",
@@ -645,6 +652,44 @@ async def describe_image(
         time.monotonic() - t0, len(description),
     )
     return description
+
+
+@mcp.tool(
+    name="describe_images",
+    annotations={
+        "title": "Describe Multiple Images",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def describe_images(
+    images: list[str] = Field(description="Ordered image sources; 1 to 8 items."),
+    instruction: Optional[str] = Field(default=None, description="Joint description or comparison instruction."),
+    detail: DetailLevel = Field(default=DetailLevel.HIGH),
+) -> str:
+    instruction = instruction if isinstance(instruction, (str, type(None))) else instruction.default
+    detail = detail if isinstance(detail, DetailLevel) else detail.default
+
+    if not 1 <= len(images) <= MAX_BATCH_IMAGES:
+        return _fmt_error("describe_images", ValueError("requires 1 to 8 images"))
+    if sum(not item.strip() for item in images) > 1:
+        return _fmt_error("describe_images", ValueError("only one clipboard image is allowed"))
+    prepared: list[tuple[bytes, str]] = []
+    for index, source in enumerate(images, start=1):
+        item, err = await _prepare_image(source or None)
+        if item is None:
+            return _fmt_error("describe_images", RuntimeError(f"image {index}: {err}"))
+        prepared.append(item)
+    prompt = instruction or (
+        "请按输入顺序联合描述这些图片。先分别转录每张图的文字和关键细节，"
+        "再指出图片之间的相同点、差异和连续关系。不要省略数字。"
+    )
+    try:
+        return await _describe_prepared_images(prepared, prompt, detail)
+    except Exception as exc:
+        return _fmt_error("describe_images", exc)
 
 
 @mcp.tool(
