@@ -67,6 +67,7 @@ from jobs import JobManager
 from recognition import RecognitionRequest, RecognitionRunner
 
 from attachments import select_pasted_images
+from claude_attachments import select_claude_pasted_images
 
 # --------------------------------------------------------------------------- #
 # Configuration. Vision model only - the main reasoning model is the one the  #
@@ -836,6 +837,64 @@ async def describe_pasted_images(
         detail=detail.value,
     )
     return await _run_compat_request("describe_pasted_images", request)
+
+
+@mcp.tool(
+    name="describe_claude_pasted_images",
+    annotations={
+        "title": "Describe Claude Code Pasted Images",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def describe_claude_pasted_images(
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Claude Code session ID. Omit to use the "
+        "CLAUDE_CODE_SESSION_ID env of this server process, then the "
+        "newest session directory as a fallback.",
+    ),
+    count: int = Field(
+        ge=1,
+        le=8,
+        description="Number of pasted image placeholders (1 to 8).",
+    ),
+    instruction: Optional[str] = Field(
+        default=None,
+        description="Optional custom vision instruction.",
+    ),
+    detail: DetailLevel = Field(default=DetailLevel.HIGH),
+) -> str:
+    """Resolve pasted Claude Code image attachments from the image cache.
+
+    Reads images from ~/.claude/image-cache/<session-id>/, where numeric
+    filenames (`1.png`, `2.png`, ...) match the `[Image N]` placeholders in
+    paste order. Selects the newest `count` supported images and sends them
+    to the vision model for structured text recognition.
+
+    This tool does NOT use the system clipboard. On failure the caller should
+    fall back to describe_image with an empty `image` argument.
+    """
+    session_id = session_id if isinstance(session_id, (str, type(None))) else session_id.default
+    instruction = instruction if isinstance(instruction, (str, type(None))) else instruction.default
+    detail = detail if isinstance(detail, DetailLevel) else detail.default
+
+    paths, err = select_claude_pasted_images(count, session_id=session_id)
+    if err:
+        return _fmt_error("describe_claude_pasted_images", RuntimeError(err))
+
+    request = RecognitionRequest(
+        kind="images",
+        sources=[str(p) for p in paths],
+        instruction=instruction or (
+            "请按输入顺序联合描述这些图片。先分别转录每张图的文字和关键细节，"
+            "再指出图片之间的相同点、差异和连续关系。不要省略数字。"
+        ),
+        detail=detail.value,
+    )
+    return await _run_compat_request("describe_claude_pasted_images", request)
 
 
 @mcp.tool(name="ask_image", annotations={"title": "Ask About Stored Image", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True})

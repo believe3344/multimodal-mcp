@@ -105,3 +105,67 @@ def test_rules_no_longer_instruct_polling() -> None:
     assert "\u4f1a\u7b49\u5f85\u8bc6\u522b\u5b8c\u6210\u5e76\u76f4\u63a5\u8fd4\u56de\u6700\u7ec8\u7ed3\u679c" in install.RULES_BLOCK
     assert "start_recognition" in install.RULES_BLOCK
     assert "status: processing" not in install.RULES_BLOCK
+
+
+def test_rules_cover_both_pasted_image_tools() -> None:
+    assert "describe_pasted_images(count=N)" in install.RULES_BLOCK
+    assert "describe_claude_pasted_images(count=N)" in install.RULES_BLOCK
+    assert "~/.claude/image-cache/<session-id>/" in install.RULES_BLOCK
+
+
+def test_upsert_settings_env_creates_file(tmp_path) -> None:
+    import json
+
+    settings = tmp_path / ".claude" / "settings.json"
+    status = install.upsert_settings_env(settings, "MCP_TOOL_TIMEOUT", "960000")
+    assert status == "updated"
+    assert json.loads(settings.read_text()) == {"env": {"MCP_TOOL_TIMEOUT": "960000"}}
+
+
+def test_upsert_settings_env_preserves_existing_keys(tmp_path) -> None:
+    import json
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"model": "opus", "env": {"OTHER": "1"}}))
+
+    status = install.upsert_settings_env(settings, "MCP_TOOL_TIMEOUT", "960000")
+    assert status == "updated"
+    assert json.loads(settings.read_text()) == {
+        "model": "opus",
+        "env": {"OTHER": "1", "MCP_TOOL_TIMEOUT": "960000"},
+    }
+
+
+def test_upsert_settings_env_is_idempotent(tmp_path) -> None:
+    import json
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"env": {"MCP_TOOL_TIMEOUT": "960000"}}))
+
+    status = install.upsert_settings_env(settings, "MCP_TOOL_TIMEOUT", "960000")
+    assert status == "already_present"
+    assert json.loads(settings.read_text()) == {"env": {"MCP_TOOL_TIMEOUT": "960000"}}
+
+
+def test_upsert_settings_env_skips_invalid_json(tmp_path) -> None:
+    settings = tmp_path / "settings.json"
+    settings.write_text("{not json")
+
+    status = install.upsert_settings_env(settings, "MCP_TOOL_TIMEOUT", "960000")
+    assert status == "error"
+    assert settings.read_text() == "{not json"
+
+
+def test_install_claude_code_writes_timeout(monkeypatch, tmp_path) -> None:
+    import json
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text("{}")
+    monkeypatch.setattr(install.Path, "home", lambda: tmp_path)
+
+    install.install_claude_code("python", ["server.py"])
+
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    assert settings["env"]["MCP_TOOL_TIMEOUT"] == str(
+        install.CLAUDE_CODE_MCP_TOOL_TIMEOUT_MS
+    )

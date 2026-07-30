@@ -24,17 +24,28 @@ client reads its rules.
    address, leave `image` empty so the tool reads the clipboard.
 
 3. Image placeholder resolution order:
-   - If the message contains a `[Multimodal attachment paths: ...]` marker, use
-     those local paths in the listed order. Pass them to `describe_image` for a
-     single image or `describe_images` for multiple images.
-   - If the message contains placeholders like `[Image 1]`, `[Image N]`,
-     `[图片]`, or `[Image attachment]` but no path marker, count the
-     placeholders and call `describe_pasted_images(count=N)`. This reads the
-     most recent attachments from OpenCode's attachment cache and restores
-     their original paste order.
-    - If `describe_pasted_images` returns a resolution error (for example, the
-      attachment cache is empty or has fewer than `N` images), fall back to
-      `describe_image` with `image` empty to read the system clipboard.
+   - If the message contains `[Image: source: /absolute/path/to/file.png]`
+     path markers, extract the absolute paths directly. Pass them to
+     `describe_image` for a single image or `describe_images` for multiple
+     images. Do not call `describe_claude_pasted_images` or read the
+     clipboard when these markers are present.
+   - Otherwise, if the message contains a `[Multimodal attachment paths: ...]`
+     marker, use those local paths in the listed order. Pass them to
+     `describe_image` for a single image or `describe_images` for multiple
+     images.
+   - Otherwise, if the message contains placeholders like `[Image 1]`,
+     `[Image N]`, `[图片]`, or `[Image attachment]` but no path marker,
+     count the placeholders and pick the tool matching your client:
+     - In Claude Code, call `describe_claude_pasted_images(count=N)`. It reads
+       the current session's `~/.claude/image-cache/<session-id>/` directory,
+       where numeric filenames (`1.png`, `2.png`, ...) match the placeholder
+       numbers in paste order.
+     - In OpenCode, call `describe_pasted_images(count=N)`. This reads the
+       most recent attachments from OpenCode's attachment cache and restores
+       their original paste order.
+   - If the matching tool returns a resolution error (for example, the
+     attachment cache is empty or has fewer than `N` images), fall back to
+     `describe_image` with `image` empty to read the system clipboard.
    - Do this even if the user sent no text at all. After getting the
      description, tell the user what you saw and ask what they need.
 
@@ -60,7 +71,8 @@ client reads its rules.
     as a permanent file identifier.
 
 9. Normal describe tools (`describe_image`, `describe_images`,
-    `describe_pasted_images`, `describe_pdf`, `ask_image`) wait for
+    `describe_pasted_images`, `describe_claude_pasted_images`, `describe_pdf`,
+    `ask_image`) wait for
     recognition to complete and return the final result directly. Do not
     re-call describe tools, switch to `get_recognition`, fall back to the
     clipboard, or ask the user to check again later just because the tool
