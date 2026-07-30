@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -56,7 +54,9 @@ def select_pasted_images(count: int, directory: Optional[Path] = None) -> tuple[
         return [], f"no supported image files in {root}"
 
     # Newest first, stable tie-breaker by path name.
-    files.sort(key=lambda p: (-p.stat().st_mtime, p.name))
+    keyed = [(p.stat().st_mtime, p.name, p) for p in files]
+    keyed.sort(key=lambda item: (-item[0], item[1]))
+    files = [p for _mtime, _name, p in keyed]
 
     selected = files[:count]
     if len(selected) < count:
