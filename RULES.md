@@ -23,13 +23,20 @@ client reads its rules.
    file path / base64, pass it; if they said "my screenshot" without giving an
    address, leave `image` empty so the tool reads the clipboard.
 
-3. If the message contains an image placeholder like `[Image 1]`, `[Image N]`,
-   `[图片]`, or `[Image attachment]` (this happens when the user pasted an
-   image attachment but the client/gateway replaced the real image data with
-   a placeholder because the main model has no vision), call `describe_image`
-   with `image` empty - the image still lives in the OS clipboard. Do this
-   even if the user sent no text at all. After getting the description, tell
-   the user what you saw and ask what they need.
+3. Image placeholder resolution order:
+   - If the message contains a `[Multimodal attachment paths: ...]` marker, use
+     those local paths in the listed order. Pass them to `describe_image` for a
+     single image or `describe_images` for multiple images.
+   - If the message contains placeholders like `[Image 1]`, `[Image N]`,
+     `[图片]`, or `[Image attachment]` but no path marker, count the
+     placeholders and call `describe_pasted_images(count=N)`. This reads the
+     most recent attachments from OpenCode's attachment cache and restores
+     their original paste order.
+   - If `describe_pasted_images` fails (for example, the attachment cache is
+     empty or has fewer than `N` images), fall back to `describe_image` with
+     `image` empty to read the system clipboard.
+   - Do this even if the user sent no text at all. After getting the
+     description, tell the user what you saw and ask what they need.
 
 4. The tool returns a text description of the image, NOT the final answer.
    After the tool returns, YOU (the main model) reason over the description
@@ -84,5 +91,5 @@ path. For project-specific rules, use the project path.
 
 1. Make sure the `multimodal` MCP server is registered in the client's config
    (see README.md for the per-client config snippet).
-2. Copy rules 1-4 above into the client's rules file (global or project).
+2. Copy rules 1-5 above into the client's rules file (global or project).
 3. Restart the client so it picks up both the MCP server and the rules.

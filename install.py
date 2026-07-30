@@ -50,7 +50,10 @@ RULES_BLOCK = f"""{RULES_MARKER_START}
 
 2. `describe_image` 的 `image` 参数自动分发：传 http(s) URL 会下载；传 data URI 会提取 base64；传本地文件路径会读取；传 raw base64 会直接用；留空（用户截图场景）会从系统剪贴板读取。根据用户给的信息决定传什么：有地址传地址，用户说"我的截图"但没给地址就留空。
 
-3. 当消息里出现 `[Image 1]`、`[Image N]`、`[图片]`、`[Image attachment]` 等占位符（说明用户粘贴了图片附件，但客户端或网关把真实图片替换成占位符），立即调用 `describe_image`，`image` 留空——工具从系统剪贴板读取用户刚截图/粘贴的图片。即使用户没打字、只发了图片，也要这么做。拿到描述后主动告诉用户你看到了什么，并询问需要做什么。
+3. 当消息里出现 `[Image 1]`、`[Image N]`、`[图片]`、`[Image attachment]` 等占位符时，按以下顺序选择图片来源：
+   - 若消息中有 `[Multimodal attachment paths: ...]` 标记，按标记中的本地路径顺序，单图传 `describe_image`，多图传 `describe_images`。
+   - 若无路径标记但出现 N 个占位符，调用 `describe_pasted_images(count=N)` 读取 OpenCode 附件目录的最新 N 张图片，并恢复原始粘贴顺序。
+   - 若 `describe_pasted_images` 失败（目录不存在、图片数量不足等），回退调用 `describe_image`，`image` 留空读取系统剪贴板。
 
 4. 工具返回的是图片文字描述，不是最终答案。拿到描述后由主模型自己推理并回答用户。
 
@@ -58,7 +61,7 @@ RULES_BLOCK = f"""{RULES_MARKER_START}
 
 6. 用户提供 PDF 时调用 `describe_pdf`。数字 PDF 直接提取文字，扫描页自动视觉识别；需要指定页码时传 `pages="1-3,5"`。
 
-7. `describe_image`、`describe_images` 和扫描 PDF 会返回 `image_id`。用户对刚才的图片继续追问时，优先调用 `ask_image(image_id, question)`，不要要求用户重新上传。
+7. `describe_image`、`describe_images`、`describe_pasted_images` 和扫描 PDF 会返回 `image_id`。用户对刚才的图片继续追问时，优先调用 `ask_image(image_id, question)`，不要要求用户重新上传。
 
 8. `image_id` 只在当前 MCP 进程内短期有效；过期后重新调用原识别工具。不要把 `image_id` 当永久文件标识。
 

@@ -12,6 +12,7 @@
 | `describe_images` | 1-8 张图片联合识别或比较 |
 | `describe_pdf` | 数字 PDF 文本提取、扫描页视觉识别 |
 | `ask_image` | 使用 `image_id` 对图片继续提问 |
+| `describe_pasted_images` | 按数量读取 OpenCode 最近粘贴的附件图片 |
 | `start_recognition` | 启动图片、多图、PDF 或 image_id 后台识别 |
 | `get_recognition` | 查询任务进度，支持最多 50 秒长等待 |
 | `cancel_recognition` | 取消后台识别任务 |
@@ -207,7 +208,11 @@ npx @modelcontextprotocol/inspector .venv/bin/python server.py
 
 ### 粘贴附件（占位符）
 
-部分客户端在把图片粘贴到对话框后，会把原始图片变成 `[Image 1]` 占位符且不保留系统剪贴板数据。对 OpenCode，可安装附件桥接插件：在 `chat.message` 钩子中把附件写进 `~/.cache/opencode/multimodal-attachments`，并向模型注入本地路径；agent 将路径传给 `describe_image`，不依赖剪贴板。
+部分客户端在把图片粘贴到对话框后，会把原始图片变成 `[Image 1]` 占位符且不保留系统剪贴板数据。对 OpenCode：
+
+1. 若消息里出现 `[Multimodal attachment paths: ...]` 标记，直接把标记中的路径传给 `describe_image` 或 `describe_images`。
+2. 若无路径标记但有 N 个占位符，调用 `describe_pasted_images(count=N)` 读取 `~/.cache/opencode/multimodal-attachments` 中的最新 N 张附件；工具会恢复原始粘贴顺序。
+3. 若附件目录为空或数量不足，回退为 `describe_image(image="")` 读取系统剪贴板。
 
 插件文件位于 `~/.config/opencode/plugins/multimodal-attachment-bridge.js`，OpenCode 会自动加载。临时图片仅当前用户可读，1 小时后在下次 OpenCode 启动时清理。
 
