@@ -39,9 +39,9 @@ def list_attachments(directory: Optional[Path] = None) -> list[Path]:
 def select_pasted_images(count: int, directory: Optional[Path] = None) -> tuple[list[Path], Optional[str]]:
     """Select the newest `count` attachment files in paste order.
 
-    Files are sorted by modification time descending, then filename ascending.
-    The newest `count` files are selected and then reversed so the oldest of the
-    selection (the first pasted image) comes first.
+    Files are sorted by modification time ascending, then filename ascending.
+    The last `count` entries (newest) are returned, preserving chronological
+    paste order: the first returned file is the oldest of the selection.
 
     Returns (paths, error_message). `paths` is empty when `error_message` is set.
     """
@@ -53,17 +53,14 @@ def select_pasted_images(count: int, directory: Optional[Path] = None) -> tuple[
         root = directory or CACHE_DIR
         return [], f"no supported image files in {root}"
 
-    # Oldest first, stable tie-breaker by path name. Selecting the last
-    # `count` entries yields the newest images while preserving paste order.
-    keyed = [(p.stat().st_mtime, p.name, p) for p in files]
-    keyed.sort(key=lambda item: (item[0], item[1]))
-    files = [p for _mtime, _name, p in keyed]
-
-    selected = files[-count:]
     if len(files) < count:
         root = directory or CACHE_DIR
         return [], (
             f"requested {count} images but only {len(files)} available in {root}"
         )
 
-    return selected, None
+    keyed = [(p.stat().st_mtime, p.name, p) for p in files]
+    keyed.sort(key=lambda item: (item[0], item[1]))
+    files = [p for _mtime, _name, p in keyed]
+
+    return files[-count:], None
