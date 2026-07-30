@@ -53,18 +53,17 @@ def select_pasted_images(count: int, directory: Optional[Path] = None) -> tuple[
         root = directory or CACHE_DIR
         return [], f"no supported image files in {root}"
 
-    # Newest first, stable tie-breaker by path name.
+    # Oldest first, stable tie-breaker by path name. Selecting the last
+    # `count` entries yields the newest images while preserving paste order.
     keyed = [(p.stat().st_mtime, p.name, p) for p in files]
-    keyed.sort(key=lambda item: (-item[0], item[1]))
+    keyed.sort(key=lambda item: (item[0], item[1]))
     files = [p for _mtime, _name, p in keyed]
 
-    selected = files[:count]
-    if len(selected) < count:
+    selected = files[-count:]
+    if len(files) < count:
         root = directory or CACHE_DIR
         return [], (
-            f"requested {count} images but only {len(selected)} available in {root}"
+            f"requested {count} images but only {len(files)} available in {root}"
         )
 
-    # Restore chronological paste order: oldest selected first.
-    selected.reverse()
     return selected, None
