@@ -153,6 +153,12 @@ class JobManager:
         except asyncio.TimeoutError:
             return False
 
+    async def wait_until_done(self, job_id: str) -> None:
+        job = self.get(job_id)
+        if job.task is None or job.task.done():
+            return
+        await asyncio.shield(job.task)
+
     def get(self, job_id: str) -> RecognitionJob:
         self._purge()
         job = self._jobs.get(job_id)

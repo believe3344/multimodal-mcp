@@ -35,7 +35,11 @@
 
 **缓存与生命周期**：描述缓存 TTL 1 小时，图片会话 TTL 30 分钟。数据仅在进程内存中，重启即清空。PDF 每次最多处理 20 页，多图最多 8 张。
 
-**后台识别**：现有 `describe_*` 工具最多同步等待 10 秒。未完成时返回 `job_id`，任务仍在后台运行；规则要求仅调用一次 `get_recognition(job_id, wait_seconds=50)`。若仍未完成，等待用户下一次追问后再查询，避免短间隔轮询放大主模型 token 消耗。任务结果保留 1 小时，进程重启后失效。最多并发两个视觉请求，瞬态错误自动重试两次。
+**同步识别**：普通 `describe_*` 和 `ask_image` 工具直接等待视觉模型完成并返回最终文字描述，不会因超过一定时长就提前返回 `job_id`。等待是一个 `await`，不轮询、不产生额外视觉请求。网络/状态瞬态错误最多自动重试两次。
+
+**后台识别（opt-in）**：`start_recognition` 立即返回 job 快照，`get_recognition` 可按需查询进度（最多等待 50 秒），`cancel_recognition` 可取消已提交任务。任务结果保留 1 小时，进程重启后失效。
+
+**OpenCode 用户须知**：OpenCode 默认约 60 秒 MCP 请求超时，须在配置中将 `mcp.multimodal.timeout` 设为 `960000`（毫秒），覆盖服务端 900 秒任务总超时。运行 `install.py` 可自动写入此值。
 
 `multimodal_config_status` 自检四个配置字段是否合理（不打印 key）。
 
@@ -110,7 +114,7 @@ python install.py --mode local
 - **uvx**（不用 clone）：command 跑 `uvx --from git+URL multimodal-mcp`
 - **local**（clone + venv）：command 跑 venv 里的 python + `server.py`
 
-**opencode**（`~/.config/opencode/opencode.json`）— `command` 是数组，凭据字段叫 `environment`：
+**opencode**（`~/.config/opencode/opencode.json`）— `command` 是数组，凭据字段叫 `environment`。OpenCode 需设 `timeout` 覆盖默认约 60 秒限制：
 
 ```jsonc
 {
@@ -118,6 +122,7 @@ python install.py --mode local
     "multimodal": {
       "type": "local",
       "command": ["uvx", "--from", "git+https://github.com/believe3344/multimodal-mcp", "multimodal-mcp"],
+      "timeout": 960000,
       "environment": {
         "PROVIDER": "openai",
         "BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -206,6 +211,13 @@ npx @modelcontextprotocol/inspector .venv/bin/python server.py
 [agent] describe_image(image="/tmp/screenshot.png") → 读文件 → 描述 → 回答
 ```
 
+### 多图同步识别
+
+```
+[用户] 识别这三张图片
+[agent] describe_images(...) → 持续等待识别 → 返回最终文字描述 → 同一回合回答
+```
+
 ### 粘贴附件（占位符）
 
 部分客户端在把图片粘贴到对话框后，会把原始图片变成 `[Image 1]` 占位符且不保留系统剪贴板数据。对 OpenCode：
@@ -219,11 +231,12 @@ npx @modelcontextprotocol/inspector .venv/bin/python server.py
 ## 故障排查
 
 | 现象 | 排查 |
-|---|---|
+|---|---|---|
 | `Missing API key` | 凭据字段里 `PROVIDER` / `API_KEY` / `BASE_URL` / `MODEL_NAME` 没填齐，或字段写错（opencode 是 `environment` 不是 `env`） |
 | `HTTP 401` | Key 错或没开通该模型 |
 | `HTTP 404` | `PROVIDER=openai` 时 `BASE_URL` 不是 `/v1` 根，或 `PROVIDER=anthropic` 时 `BASE_URL` 误填成 `/v1/messages` 之类的完整路径 |
 | 大图超时 / 间歇失败 | 已在服务端自动压缩；仍失败就看 MCP 服务器 stderr 日志里的体积与耗时 |
+| OpenCode 约 60 秒超时 | 未配 `timeout` 字段。运行 `install.py` 自动写入 `960000` ms，或手动在 `opencode.json` 的 `mcp.multimodal` 下加 `"timeout": 960000` |
 | `not a supported image` | 输入不是图片文件（只支持 PNG/JPEG/GIF/WebP/BMP） |
 | `clipboard has no image` | 截图后别再复制其他内容；macOS 用 Cmd+Ctrl+Shift+4 才直接进剪贴板 |
 | 描述模糊 | `detail` 设 `high`，或自定义 `instruction` |

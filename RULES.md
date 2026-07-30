@@ -32,11 +32,9 @@ client reads its rules.
      placeholders and call `describe_pasted_images(count=N)`. This reads the
      most recent attachments from OpenCode's attachment cache and restores
      their original paste order.
-   - If `describe_pasted_images` returns a resolution error (for example, the
-     attachment cache is empty or has fewer than `N` images), fall back to
-     `describe_image` with `image` empty to read the system clipboard. A
-     `status: processing` response with a `job_id` is NOT a failure: never fall
-     back or retry with another tool in that case; follow rule 9.
+    - If `describe_pasted_images` returns a resolution error (for example, the
+      attachment cache is empty or has fewer than `N` images), fall back to
+      `describe_image` with `image` empty to read the system clipboard.
    - Do this even if the user sent no text at all. After getting the
      description, tell the user what you saw and ask what they need.
 
@@ -61,14 +59,13 @@ client reads its rules.
     If expired, re-call the original description tool. Never treat `image_id`
     as a permanent file identifier.
 
-9. If a describe tool returns `status: processing` and a `job_id`, the vision
-   model is still working (large images commonly take 30-90 seconds). Do NOT
-   call any describe tool again, do NOT fall back to the clipboard, and do NOT
-   retry with a different tool — that submits duplicate recognition jobs and
-   makes everything slower. Call `get_recognition(job_id, wait_seconds=50)`
-   exactly once in this turn. If it is still processing, tell the user the
-   task is still running (include the `job_id`) and END the turn; check again
-   only after the user responds.
+9. Normal describe tools (`describe_image`, `describe_images`,
+    `describe_pasted_images`, `describe_pdf`, `ask_image`) wait for
+    recognition to complete and return the final result directly. Do not
+    re-call describe tools, switch to `get_recognition`, fall back to the
+    clipboard, or ask the user to check again later just because the tool
+    call takes a long time. Only use `get_recognition` to query jobs that
+    were explicitly started with `start_recognition`.
 
 10. When a PDF task returns partial results, answer from completed pages and
     clearly report failed page numbers. Retry only failed pages when the user

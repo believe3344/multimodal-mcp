@@ -83,29 +83,130 @@ async def test_compat_tool_returns_result_when_job_finishes_quickly(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_compat_tool_returns_job_without_cancelling_slow_task(monkeypatch) -> None:
+async def test_compat_tool_waits_for_slow_task_and_returns_late_result(monkeypatch) -> None:
     release = asyncio.Event()
+    started = asyncio.Event()
 
     async def fake_run(job, request):
         job.set_total_units(1)
+        started.set()
         await release.wait()
         job.complete_unit("image", "late result")
         return "late result"
 
     monkeypatch.setattr(server.RUNNER, "run", fake_run)
-    monkeypatch.setattr(server, "SYNC_WAIT_SECONDS", 0.01)
     monkeypatch.setattr(
         server,
         "JOBS",
         JobManager(result_ttl=60, max_entries=8, total_timeout=5),
     )
-    response = json.loads(await server.describe_image(image="image"))
-    assert response["status"] == "processing"
-    release.set()
-    completed = json.loads(
-        await server.get_recognition(response["job_id"], wait_seconds=1)
+    call = asyncio.create_task(server.describe_image(image="image"))
+    try:
+        await started.wait()
+        await asyncio.sleep(0.02)
+        assert call.done() is False
+        release.set()
+        assert await call == "late result"
+    finally:
+        release.set()
+        await asyncio.gather(call, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_compat_tool_returns_terminal_failure(monkeypatch) -> None:
+    async def fake_run(job, request):
+        raise RuntimeError("vision unavailable")
+
+    monkeypatch.setattr(server.RUNNER, "run", fake_run)
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
     )
-    assert completed["result"] == "late result"
+
+    assert await server.describe_image(image="image") == (
+        "[describe_image failed] RuntimeError: RuntimeError: vision unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_compat_tool_returns_terminal_cancelled(monkeypatch) -> None:
+    async def fake_run(job, request):
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    manager = JobManager(result_ttl=60, max_entries=8, total_timeout=5)
+    submitted = asyncio.Event()
+    captured = []
+    original_submit = server._submit_request
+
+    def capture_submit(request):
+        job = original_submit(request)
+        captured.append(job)
+        submitted.set()
+        return job
+
+    monkeypatch.setattr(server.RUNNER, "run", fake_run)
+    monkeypatch.setattr(server, "JOBS", manager)
+    monkeypatch.setattr(server, "_submit_request", capture_submit)
+    call = asyncio.create_task(server.describe_image(image="image"))
+    await submitted.wait()
+    manager.cancel(captured[0].job_id)
+
+    assert await call == "[describe_image failed] RuntimeError: cancelled"
+
+
+@pytest.mark.asyncio
+async def test_compat_tool_returns_total_timeout_failure(monkeypatch) -> None:
+    async def fake_run(job, request):
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    monkeypatch.setattr(server.RUNNER, "run", fake_run)
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=0.01),
+    )
+
+    assert await server.describe_image(image="image") == (
+        "[describe_image failed] RuntimeError: job exceeded 0s total timeout"
+    )
+
+
+@pytest.mark.asyncio
+async def test_compat_tool_deduplicates_concurrent_requests(monkeypatch) -> None:
+    release = asyncio.Event()
+    started = asyncio.Event()
+    calls = 0
+
+    async def fake_run(job, request):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return "done"
+
+    monkeypatch.setattr(server.RUNNER, "run", fake_run)
+    monkeypatch.setattr(
+        server,
+        "JOBS",
+        JobManager(result_ttl=60, max_entries=8, total_timeout=5),
+    )
+    first = asyncio.create_task(server.describe_image(image="same"))
+    second = asyncio.create_task(server.describe_image(image="same"))
+    try:
+        await started.wait()
+        await asyncio.sleep(0)
+        assert calls == 1
+        assert first.done() is False
+        assert second.done() is False
+        release.set()
+        assert await asyncio.gather(first, second) == ["done", "done"]
+        assert calls == 1
+    finally:
+        release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -48,6 +48,47 @@ async def test_wait_timeout_does_not_cancel_background_task() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wait_until_done_blocks_for_existing_task() -> None:
+    manager = JobManager(result_ttl=60, max_entries=8, total_timeout=5)
+    release = asyncio.Event()
+
+    async def runner(job):
+        await release.wait()
+        return "done"
+
+    job = manager.submit(kind="image", dedupe_key="terminal-wait", runner=runner)
+    waiter = asyncio.create_task(manager.wait_until_done(job.job_id))
+    await asyncio.sleep(0)
+    assert waiter.done() is False
+
+    release.set()
+    await waiter
+    assert manager.snapshot(job.job_id)["result"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_terminal_wait_does_not_cancel_shared_job() -> None:
+    manager = JobManager(result_ttl=60, max_entries=8, total_timeout=5)
+    release = asyncio.Event()
+
+    async def runner(job):
+        await release.wait()
+        return "done"
+
+    job = manager.submit(kind="image", dedupe_key="cancel-terminal-wait", runner=runner)
+    waiter = asyncio.create_task(manager.wait_until_done(job.job_id))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    assert manager.snapshot(job.job_id)["status"] == JobStatus.PROCESSING.value
+    release.set()
+    await manager.wait_until_done(job.job_id)
+    assert manager.snapshot(job.job_id)["status"] == JobStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
 async def test_cancel_marks_running_job_cancelled() -> None:
     manager = JobManager(result_ttl=60, max_entries=8, total_timeout=5)
 

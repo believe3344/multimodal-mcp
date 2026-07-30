@@ -69,3 +69,39 @@ def test_main_passes_provider_env_with_complete_vision_credentials(monkeypatch) 
         "MODEL_NAME": "claude-3-7-sonnet",
     }
     assert [env for _, env in captured] == [expected_env] * len(captured)
+
+
+def test_build_opencode_entry_includes_timeout() -> None:
+    entry = install.build_opencode_entry("python", ["server.py"], {"MODEL_NAME": "vision"})
+    assert entry == {
+        "type": "local",
+        "command": ["python", "server.py"],
+        "environment": {"MODEL_NAME": "vision"},
+        "timeout": 960_000,
+    }
+
+
+def test_build_opencode_entry_timeout_without_env() -> None:
+    entry = install.build_opencode_entry("python", ["server.py"])
+    assert entry == {
+        "type": "local",
+        "command": ["python", "server.py"],
+        "timeout": 960_000,
+    }
+
+
+def test_build_json_entry_does_not_include_timeout() -> None:
+    entry = install.build_json_entry("python", ["server.py"], {"MODEL_NAME": "vision"})
+    assert entry == {
+        "command": "python",
+        "args": ["server.py"],
+        "env": {"MODEL_NAME": "vision"},
+    }
+
+
+def test_rules_no_longer_instruct_polling() -> None:
+    assert "get_recognition(job_id, wait_seconds=50)" not in install.RULES_BLOCK
+    assert "\u7ed3\u675f\u5f53\u524d\u56de\u5408" not in install.RULES_BLOCK
+    assert "\u4f1a\u7b49\u5f85\u8bc6\u522b\u5b8c\u6210\u5e76\u76f4\u63a5\u8fd4\u56de\u6700\u7ec8\u7ed3\u679c" in install.RULES_BLOCK
+    assert "start_recognition" in install.RULES_BLOCK
+    assert "status: processing" not in install.RULES_BLOCK

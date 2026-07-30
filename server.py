@@ -103,7 +103,6 @@ def _positive_int_env(name: str, default: int) -> int:
         return default
 
 
-SYNC_WAIT_SECONDS = _positive_float_env("SYNC_WAIT_SECONDS", 10.0)
 POLL_WAIT_MAX_SECONDS = _positive_float_env("POLL_WAIT_MAX_SECONDS", 50.0)
 UPSTREAM_CONNECT_TIMEOUT = _positive_float_env("UPSTREAM_CONNECT_TIMEOUT", 10.0)
 UPSTREAM_READ_TIMEOUT = _positive_float_env("UPSTREAM_READ_TIMEOUT", 90.0)
@@ -621,23 +620,11 @@ def _submit_request(request: RecognitionRequest):
 
 
 async def _wait_for_compat_result(job) -> str:
-    completed = await JOBS.wait(job.job_id, SYNC_WAIT_SECONDS)
+    await JOBS.wait_until_done(job.job_id)
     snapshot = JOBS.snapshot(job.job_id)
-    if completed and snapshot["status"] in {"completed", "partial"}:
+    if snapshot["status"] in {"completed", "partial"}:
         return str(snapshot.get("result", ""))
-    if completed and snapshot["status"] in {"failed", "cancelled"}:
-        raise RuntimeError(str(snapshot.get("error", snapshot["status"])))
-    return json.dumps(
-        {
-            "status": snapshot["status"],
-            "job_id": job.job_id,
-            "message": "识别仍在后台进行；仅调用一次 get_recognition(job_id, wait_seconds=50)",
-            "completed_units": snapshot["completed_units"],
-            "total_units": snapshot["total_units"],
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
+    raise RuntimeError(str(snapshot.get("error", snapshot["status"])))
 
 
 async def _run_compat_request(stage: str, request: RecognitionRequest) -> str:

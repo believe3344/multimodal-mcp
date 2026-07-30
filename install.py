@@ -39,6 +39,7 @@ VENV_DIR = PROJECT_DIR / ".venv"
 SERVER_PY = PROJECT_DIR / "server.py"
 REQUIREMENTS = PROJECT_DIR / "requirements.txt"
 SERVER_NAME = "multimodal"
+OPENCODE_MCP_TIMEOUT_MS = 960_000
 
 RULES_MARKER_START = "<!-- multimodal-mcp rules start -->"
 RULES_MARKER_END = "<!-- multimodal-mcp rules end -->"
@@ -50,10 +51,10 @@ RULES_BLOCK = f"""{RULES_MARKER_START}
 
 2. `describe_image` 的 `image` 参数自动分发：传 http(s) URL 会下载；传 data URI 会提取 base64；传本地文件路径会读取；传 raw base64 会直接用；留空（用户截图场景）会从系统剪贴板读取。根据用户给的信息决定传什么：有地址传地址，用户说"我的截图"但没给地址就留空。
 
-3. 当消息里出现 `[Image 1]`、`[Image N]`、`[图片]`、`[Image attachment]` 等占位符时，按以下顺序选择图片来源：
-   - 若消息中有 `[Multimodal attachment paths: ...]` 标记，按标记中的本地路径顺序，单图传 `describe_image`，多图传 `describe_images`。
-   - 若无路径标记但出现 N 个占位符，调用 `describe_pasted_images(count=N)` 读取 OpenCode 附件目录的最新 N 张图片，并恢复原始粘贴顺序。
-   - 若 `describe_pasted_images` 返回识别失败错误（目录不存在、图片数量不足等），回退调用 `describe_image`，`image` 留空读取系统剪贴板。注意：返回 `status: processing` 和 `job_id` 不是失败，禁止回退或换工具重试，按规则 9 处理。
+ 3. 当消息里出现 `[Image 1]`、`[Image N]`、`[图片]`、`[Image attachment]` 等占位符时，按以下顺序选择图片来源：
+    - 若消息中有 `[Multimodal attachment paths: ...]` 标记，按标记中的本地路径顺序，单图传 `describe_image`，多图传 `describe_images`。
+    - 若无路径标记但出现 N 个占位符，调用 `describe_pasted_images(count=N)` 读取 OpenCode 附件目录的最新 N 张图片，并恢复原始粘贴顺序。
+    - 若 `describe_pasted_images` 返回识别失败错误（目录不存在、图片数量不足等），回退调用 `describe_image`，`image` 留空读取系统剪贴板。
 
 4. 工具返回的是图片文字描述，不是最终答案。拿到描述后由主模型自己推理并回答用户。
 
@@ -65,7 +66,7 @@ RULES_BLOCK = f"""{RULES_MARKER_START}
 
 8. `image_id` 只在当前 MCP 进程内短期有效；过期后重新调用原识别工具。不要把 `image_id` 当永久文件标识。
 
-9. 如果 describe 工具返回 `status: processing` 和 `job_id`，说明视觉模型仍在识别（大图常见，可能需要 30-90 秒）。此时绝对不要再次调用任何 describe 工具、不要回退剪贴板、不要换工具重试——那会重复提交识别任务、越等越慢。本回合只调用一次 `get_recognition(job_id, wait_seconds=50)`；如果仍未完成，直接告知用户"识别仍在后台进行，job_id=xxx，稍后可以继续查询"，结束当前回合，等用户回应后再查。
+ 9. 普通 describe 工具（`describe_image`、`describe_images`、`describe_pasted_images`、`describe_pdf`、`ask_image`）会等待识别完成并直接返回最终结果。不要因为工具等待时间较长而重复调用 describe 工具、改用 `get_recognition`、回退剪贴板或让用户稍后追问。只有明确调用 `start_recognition` 启动后台任务后，才使用 `get_recognition` 查询该任务。
 
 10. 当 PDF 任务返回 partial 结果时，用已完成页面回答用户问题，并清晰报告失败页码。只在用户要求时重试失败页。
 {RULES_MARKER_END}
@@ -208,7 +209,11 @@ def write_rules_file(path: Path) -> str:
 # Config writers.                                                             #
 # --------------------------------------------------------------------------- #
 def build_opencode_entry(command: str, args: list[str], env: Optional[dict[str, str]] = None) -> dict:
-    entry: dict[str, object] = {"type": "local", "command": [command, *args]}
+    entry: dict[str, object] = {
+        "type": "local",
+        "command": [command, *args],
+        "timeout": OPENCODE_MCP_TIMEOUT_MS,
+    }
     if env:
         entry["environment"] = env
     return entry
