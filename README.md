@@ -60,6 +60,8 @@
 
 **OpenCode 用户须知**：OpenCode 默认约 60 秒 MCP 请求超时，须在配置中将 `mcp.multimodal.timeout` 设为 `960000`（毫秒），覆盖服务端 900 秒任务总超时。运行 `install.py` 可自动写入此值。
 
+**Reasonix 用户须知**：Reasonix 默认 MCP 调用超时 300 秒，低于服务端 900 秒任务总超时。在 `~/.reasonix/config.toml`（或项目 `./reasonix.toml`）里设置 `[tools] mcp_call_timeout_seconds = 960`。运行 `install.py` 会自动写入项目 `.mcp.json` 并打印此提示。
+
 "剪贴板"路径解决客户端拦截粘贴图片的问题：截图后不粘贴到聊天框，打字说"看下我的截图"，工具直接读剪贴板。跨平台跨客户端。
 
 ## 项目架构
@@ -88,7 +90,7 @@ multimodal-mcp/
 | `attachments.py` | 遍历 `~/.cache/opencode/multimodal-attachments`，按后缀过滤、按 mtime 选最新 N 张、恢复粘贴顺序 |
 | `claude_attachments.py` | 通过 `CLAUDE_CODE_SESSION_ID` 环境变量定位 `~/.claude/image-cache/<session-id>/`，按数字文件名排序（`1.png`→`[Image 1]`），带路径穿越防护和 newest-session 兜底 |
 | `pdf_support.py` | PyMuPDF 封装：页码选择解析（`"1-3,5"`）、auto/text/vision 模式切换、扫描页 PNG 渲染，默认上限 20 页 |
-| `install.py` | 自动检测已安装客户端（opencode / Claude Desktop / Claude Code / Cursor / Codex / Windsurf / Cline），写入 MCP 配置 + 规则文件；支持 uvx / local 两种运行模式 |
+| `install.py` | 自动检测已安装客户端（opencode / Claude Desktop / Claude Code / Cursor / Codex / Windsurf / Cline / Reasonix），写入 MCP 配置 + 规则文件；支持 uvx / local 两种运行模式 |
 
 ## 系统依赖
 
@@ -207,6 +209,34 @@ args = ["--from", "git+https://github.com/believe3344/multimodal-mcp", "multimod
 env = { PROVIDER = "openai", BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1", API_KEY = "sk-xxxxx", MODEL_NAME = "qwen3.7-plus" }
 ```
 
+**Reasonix**（项目级，推荐）— 在项目根目录放 `.mcp.json`，用 Claude Code 的 `mcpServers` schema（Reasonix 原生兼容，`install.py` 会自动写入）：
+
+```jsonc
+{
+  "mcpServers": {
+    "multimodal": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/believe3344/multimodal-mcp", "multimodal-mcp"],
+      "env": {
+        "PROVIDER": "openai",
+        "BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "API_KEY": "sk-xxxxx",
+        "MODEL_NAME": "qwen3.7-plus"
+      }
+    }
+  }
+}
+```
+
+Reasonix 全局配置在 `~/.reasonix/config.toml`。Reasonix 默认 MCP 调用超时 300 秒，低于服务端 900 秒任务上限，长任务请在 `~/.reasonix/config.toml`（或项目 `./reasonix.toml`）里调大：
+
+```toml
+[tools]
+mcp_call_timeout_seconds = 960
+```
+
+Reasonix 粘贴图片会存到项目根 `.reasonix/attachments/`，消息里带路径标记，规则已覆盖（见下文"粘贴附件"）。
+
 **local 模式**：把上面 uvx 的 command/args 换成 venv python + `server.py` 绝对路径，凭据字段不变（opencode 仍 `environment`，其他仍 `env`）。`command` 必须是 venv 里的 python，否则缺 `mcp` / `httpx` 依赖。准备 venv：
 
 ```bash
@@ -219,7 +249,7 @@ uv pip install -r requirements.txt
 
 ### 规则文件
 
-`install.py` 会自动把"何时调 `describe_image`"的规则写进各客户端规则文件（opencode `AGENTS.md` / Claude `CLAUDE.md` / Cursor `.mdc` / Codex `AGENTS.md` / Windsurf `.windsurfrules` / Cline `.clinerules`）。手动配置时需自行添加，模板见 `RULES.md`。
+`install.py` 会自动把"何时调 `describe_image`"的规则写进各客户端规则文件（opencode `AGENTS.md` / Claude `CLAUDE.md` / Cursor `.mdc` / Codex `AGENTS.md` / Windsurf `.windsurfrules` / Cline `.clinerules` / Reasonix 项目 `CLAUDE.md`）。手动配置时需自行添加，模板见 `RULES.md`。
 
 ## 测试
 
@@ -269,12 +299,15 @@ npx @modelcontextprotocol/inspector .venv/bin/python server.py
 
 1. 若消息里出现 `[Image: source: /绝对路径/文件.png]` 格式的路径标记，直接提取绝对路径传给 `describe_image` 或 `describe_images`。
 2. 否则，若消息里出现 `[Multimodal attachment paths: ...]` 标记，直接把标记中的路径传给 `describe_image` 或 `describe_images`。
-3. 否则，若无路径标记但有 N 个占位符，按客户端选择工具：
+3. 否则，若消息里出现 Reasonix 附件标记（`@.reasonix/attachments/...` 路径，或 `[image attachment available at @.reasonix/attachments/<文件>; ...]`），把其中的相对路径基于项目根目录解析为绝对路径，传给 `describe_image` 或 `describe_images`。
+4. 否则，若无路径标记但有 N 个占位符，按客户端选择工具：
    - **Claude Code**：调用 `describe_claude_pasted_images(count=N)`。Claude Code 把粘贴图片存在 `~/.claude/image-cache/<session-id>/<N>.png`，数字文件名就是占位符序号；工具通过 server 进程环境变量 `CLAUDE_CODE_SESSION_ID` 精确定位当前会话目录（env 缺失时退化为最新会话目录），无需任何配置。
    - **OpenCode**：调用 `describe_pasted_images(count=N)` 读取 `~/.cache/opencode/multimodal-attachments` 中的最新 N 张附件；工具会恢复原始粘贴顺序。
-4. 若附件目录为空或数量不足，回退为 `describe_image(image="")` 读取系统剪贴板。
+5. 若附件目录为空或数量不足，回退为 `describe_image(image="")` 读取系统剪贴板。
 
 OpenCode 侧的附件缓存由插件 `~/.config/opencode/plugins/multimodal-attachment-bridge.js` 写入，OpenCode 会自动加载。临时图片仅当前用户可读，1 小时后在下次 OpenCode 启动时清理。
+
+**Reasonix**：图片粘贴由 Reasonix 接管（macOS/Linux `Ctrl+V`，Windows `Alt+V`，或 `/paste-image`），附件保存到项目根目录 `.reasonix/attachments/clipboard-<时间戳>-<序号>.png`，消息里会注入 `@.reasonix/attachments/<文件>` 路径标记（图片字节不内联）。主模型不支持视觉时直接把这些路径传给 `describe_image` / `describe_images` 即可，不需要额外的缓存解析工具。
 
 ## 故障排查
 
@@ -286,6 +319,7 @@ OpenCode 侧的附件缓存由插件 `~/.config/opencode/plugins/multimodal-atta
 | 大图超时 / 间歇失败 | 已在服务端自动压缩；仍失败就看 MCP 服务器 stderr 日志里的体积与耗时 |
 | OpenCode 约 60 秒超时 | 未配 `timeout` 字段。运行 `install.py` 自动写入 `960000` ms，或手动在 `opencode.json` 的 `mcp.multimodal` 下加 `"timeout": 960000` |
 | Claude Code 工具调用超时 | 未配 `MCP_TOOL_TIMEOUT`。运行 `install.py` 自动写入 `~/.claude/settings.json` 的 `env.MCP_TOOL_TIMEOUT=960000`，或手动添加 |
+| Reasonix 长任务超时 | 未配 `[tools] mcp_call_timeout_seconds`（默认 300 秒，低于服务端 900 秒上限）。在 `~/.reasonix/config.toml` 或项目 `./reasonix.toml` 设为 `960` |
 | `not a supported image` | 输入不是图片文件（只支持 PNG/JPEG/GIF/WebP/BMP） |
 | `clipboard has no image` | 截图后别再复制其他内容；macOS 用 Cmd+Ctrl+Shift+4 才直接进剪贴板 |
 | 描述模糊 | `detail` 设 `high`，或自定义 `instruction` |

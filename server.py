@@ -472,6 +472,19 @@ async def _resolve_binary_source(
                 return file.read(), None
         except OSError as exc:
             return None, f"read file failed: {type(exc).__name__}: {exc}"
+    elif not os.path.isabs(src) and os.path.exists(os.path.join(os.getcwd(), src)):
+        # Relative path (e.g. Reasonix attachments `.reasonix/attachments/xxx.png`),
+        # resolved against the server process working directory. This makes
+        # paths injected by clients that start MCP from the project root work
+        # directly. Falls through to base64 handling when not a real file.
+        try:
+            path = os.path.join(os.getcwd(), src)
+            if os.path.getsize(path) > max_bytes:
+                return None, f"file exceeds {max_bytes // (1024 * 1024)}MB limit"
+            with open(path, "rb") as file:
+                return file.read(), None
+        except OSError as exc:
+            return None, f"read file failed: {type(exc).__name__}: {exc}"
     else:
         encoded = src
     try:

@@ -233,3 +233,31 @@ async def test_cache_status_and_clear(monkeypatch, png_bytes: bytes) -> None:
     result = await server.clear_multimodal_state(server.StateTarget.ALL)
     assert '"cache_entries_removed": 1' in result
     assert state.stats()["image_entries"] == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_binary_source_reads_relative_path(monkeypatch, tmp_path, png_bytes: bytes) -> None:
+    """Relative paths (e.g. Reasonix `.reasonix/attachments/xxx.png`) resolve
+    against the server process working directory."""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "shot.png").write_bytes(png_bytes)
+    monkeypatch.chdir(tmp_path)
+
+    data, err = await server._resolve_binary_source("sub/shot.png", max_bytes=10 * 1024 * 1024)
+    assert err is None
+    assert data == png_bytes
+
+
+@pytest.mark.asyncio
+async def test_resolve_binary_source_falls_back_to_base64_for_missing_relative_path(
+    monkeypatch, tmp_path
+) -> None:
+    import base64 as b64
+
+    monkeypatch.chdir(tmp_path)
+    payload = b64.b64encode(b"not-a-real-image").decode()
+
+    data, err = await server._resolve_binary_source(payload, max_bytes=1024)
+    assert err is None
+    assert data == b"not-a-real-image"

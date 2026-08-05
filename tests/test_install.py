@@ -57,6 +57,7 @@ def test_main_passes_provider_env_with_complete_vision_credentials(monkeypatch) 
     monkeypatch.setattr(install, "install_codex", record_env("codex"))
     monkeypatch.setattr(install, "install_windsurf", record_env("windsurf"))
     monkeypatch.setattr(install, "install_cline", record_env("cline"))
+    monkeypatch.setattr(install, "install_reasonix", record_env("reasonix"))
 
     result = install.main()
 
@@ -169,3 +170,55 @@ def test_install_claude_code_writes_timeout(monkeypatch, tmp_path) -> None:
     assert settings["env"]["MCP_TOOL_TIMEOUT"] == str(
         install.CLAUDE_CODE_MCP_TOOL_TIMEOUT_MS
     )
+
+
+def test_rules_cover_reasonix_attachment_marker() -> None:
+    assert "@.reasonix/attachments/" in install.RULES_BLOCK
+    assert "image attachment available at" in install.RULES_BLOCK
+
+
+def test_install_reasonix_skips_without_reasonix_home(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setattr(install.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(install, "PROJECT_DIR", tmp_path)
+
+    install.install_reasonix("python", ["server.py"])
+
+    output = capsys.readouterr().out
+    assert "skipping" in output
+    assert not (tmp_path / ".mcp.json").exists()
+
+
+def test_install_reasonix_writes_project_mcp_json_and_rules(monkeypatch, tmp_path) -> None:
+    import json
+
+    (tmp_path / ".reasonix").mkdir()
+    monkeypatch.setattr(install.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(install, "PROJECT_DIR", tmp_path)
+
+    install.install_reasonix("python", ["server.py"], {"MODEL_NAME": "vision"})
+
+    config = json.loads((tmp_path / ".mcp.json").read_text())
+    assert config["mcpServers"]["multimodal"] == {
+        "command": "python",
+        "args": ["server.py"],
+        "env": {"MODEL_NAME": "vision"},
+    }
+    assert "multimodal-mcp rules start" in (tmp_path / "CLAUDE.md").read_text()
+
+
+def test_install_reasonix_is_idempotent(monkeypatch, tmp_path, capsys) -> None:
+    import json
+
+    (tmp_path / ".reasonix").mkdir()
+    monkeypatch.setattr(install.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(install, "PROJECT_DIR", tmp_path)
+
+    install.install_reasonix("python", ["server.py"])
+    first = (tmp_path / ".mcp.json").read_text()
+    install.install_reasonix("python", ["server.py"])
+    second = (tmp_path / ".mcp.json").read_text()
+
+    assert first == second
+    assert json.loads(first)["mcpServers"]["multimodal"]["command"] == "python"
+    output = capsys.readouterr().out
+    assert "mcp_call_timeout_seconds" in output

@@ -33,6 +33,12 @@ client reads its rules.
      marker, use those local paths in the listed order. Pass them to
      `describe_image` for a single image or `describe_images` for multiple
      images.
+   - Otherwise, if the message contains Reasonix attachment markers
+     (`@.reasonix/attachments/...` paths or
+     `[image attachment available at @.reasonix/attachments/<file>; ...]`),
+     extract the relative paths, resolve them to absolute paths relative to
+     the project root, and pass them to `describe_image` (single) or
+     `describe_images` (multiple). Do not read the clipboard.
    - Otherwise, if the message contains placeholders like `[Image 1]`,
      `[Image N]`, `[图片]`, or `[Image attachment]` but no path marker,
      count the placeholders and pick the tool matching your client:
@@ -91,6 +97,7 @@ Copy the rules above into the file matching your client:
 |---|---|---|
 | opencode | `~/.config/opencode/AGENTS.md` | `./AGENTS.md` |
 | Claude Desktop / Claude Code | n/a (use project) | `./CLAUDE.md` |
+| Reasonix | n/a (use project) | `./CLAUDE.md` / `./REASONIX.md` / `./AGENTS.md` |
 | Cursor | `~/.cursor/rules/*.mdc` or global settings | `./.cursorrules` or `./.cursor/rules/*.mdc` |
 | Windsurf | n/a | `./.windsurfrules` |
 | Cline / Roo | n/a | `./.clinerules` |
@@ -106,5 +113,5 @@ path. For project-specific rules, use the project path.
 
 1. Make sure the `multimodal` MCP server is registered in the client's config
    (see README.md for the per-client config snippet).
-2. Copy rules 1-5 above into the client's rules file (global or project).
+2. Copy rules 1-10 above into the client's rules file (global or project).
 3. Restart the client so it picks up both the MCP server and the rules.
